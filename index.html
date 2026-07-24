@@ -403,6 +403,34 @@
     return () => ref.off('value', handler);
   }
 
+  // 授業データを削除
+  async function deleteClass(classId) {
+    if (!firebaseReady) return;
+    await db.ref(`classes/${classId}`).remove();
+  }
+
+  // 24時間以上前の古いクラスを自動削除
+  async function cleanupOldClasses(hoursToKeep = 24) {
+    if (!firebaseReady) return 0;
+    const cutoff = Date.now() - hoursToKeep * 60 * 60 * 1000;
+    try {
+      const snap = await db.ref('classes').once('value');
+      if (!snap.exists()) return 0;
+      const tasks = [];
+      snap.forEach(child => {
+        const createdAt = child.val()?.createdAt || 0;
+        if (createdAt < cutoff) {
+          tasks.push(db.ref(`classes/${child.key}`).remove());
+        }
+      });
+      await Promise.all(tasks);
+      return tasks.length;
+    } catch(e) {
+      console.warn('cleanup error:', e);
+      return 0;
+    }
+  }
+
   // ======================================================
   // フッターコンポーネント
   // ======================================================
@@ -479,6 +507,12 @@
     const [classId, setClassId] = useState(() => generateClassId());
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [cleanedCount, setCleanedCount] = useState(0);
+
+    // 画面表示時に古いクラスを自動削除
+    useEffect(() => {
+      cleanupOldClasses(24).then(n => { if (n > 0) setCleanedCount(n); });
+    }, []);
 
     const handleStart = async () => {
       if (!classId.match(/^\d{5}$/)) { setError('授業IDは5桁の数字を入力してください'); return; }
@@ -507,6 +541,12 @@
                 先生セットアップ
               </h2>
               <p className="text-white/50 text-sm mt-1">授業の設定をしてください</p>
+              {cleanedCount > 0 && (
+                <div className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold"
+                  style={{background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.3)', color: '#86efac'}}>
+                  🗑️ 古いデータ {cleanedCount}件を自動削除しました
+                </div>
+              )}
             </div>
 
             <div className="glass-strong p-8 flex flex-col gap-6">
@@ -592,6 +632,20 @@
       const unsub = subscribeClass(classId, data => setClassData(data));
       return () => unsub();
     }, [classId]);
+
+    // 授業終了：データを削除して戻る
+    const handleEndClass = async () => {
+      const ok = window.confirm(
+        `「${subject}」の授業を終了しますか？\n\nFirebaseのデータ（ID: ${classId}）を削除します。\n必要な場合は先に「画像保存」をしてください。`
+      );
+      if (!ok) return;
+      try {
+        await deleteClass(classId);
+      } catch(e) {
+        console.warn('削除エラー:', e);
+      }
+      onBack();
+    };
 
     const students = classData ? Object.entries(classData.students || {}) : [];
     const filtered = filter === 'all'
@@ -687,11 +741,11 @@
               </button>
               <button
                 id="teacher-end-btn"
-                onClick={onBack}
+                onClick={handleEndClass}
                 className="px-3 py-2 rounded-xl text-sm font-bold transition-all"
-                style={{background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.5)'}}
+                style={{background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.35)', color: '#fca5a5'}}
               >
-                終了
+                🗑️ 授業終了
               </button>
             </div>
           </div>
@@ -992,16 +1046,20 @@
                   onClick={() => handleLevelSelect(cfg.level)}
                   className={`level-btn ${cfg.className} ${understanding === cfg.level ? 'selected' : ''}`}
                   style={{
-                    aspectRatio: '1',
+                    height: '110px',
                     boxShadow: understanding === cfg.level ? `0 0 20px ${cfg.shadow}` : `0 4px 12px ${cfg.shadow}`,
                     color: 'white',
-                    fontSize: 'clamp(0.6rem, 2vw, 0.75rem)',
-                    padding: '6px 4px',
+                    padding: '8px 4px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '4px',
                   }}
                 >
-                  <span style={{fontSize: 'clamp(1.2rem, 4vw, 1.6rem)'}}>{cfg.emoji}</span>
-                  <span className="font-black" style={{fontSize: 'clamp(1rem, 3vw, 1.3rem)'}}>{cfg.level}</span>
-                  <span className="font-bold leading-tight text-center px-1" style={{fontSize: 'clamp(0.55rem, 1.8vw, 0.7rem)', opacity: 0.9}}>
+                  <span style={{fontSize: '1.8rem', lineHeight: 1}}>{cfg.emoji}</span>
+                  <span style={{fontSize: '1.4rem', fontWeight: 900, lineHeight: 1}}>{cfg.level}</span>
+                  <span style={{fontSize: '0.6rem', fontWeight: 700, lineHeight: 1.2, textAlign: 'center', opacity: 0.92, padding: '0 2px', wordBreak: 'keep-all'}}>
                     {cfg.label}
                   </span>
                 </button>
