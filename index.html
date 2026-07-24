@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>まなびメーター | 授業中リアルタイム理解度共有</title>
+  <meta name="description" content="授業中に児童・生徒の理解度と意思表示をリアルタイムで共有するアプリ。作成者：黒田先生" />
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=M+PLUS+Rounded+1c:wght@400;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Noto Sans JP"', 'sans-serif'],
+            rounded: ['"M PLUS Rounded 1c"', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#f0f4ff',
+              100: '#dde6ff',
+              200: '#b8cbff',
+              300: '#86a3ff',
+              400: '#506dff',
+              500: '#2b44f5',
+              600: '#1c2fe8',
+              700: '#1724cc',
+              800: '#1920a6',
+              900: '#1b2083',
+            }
+          },
+          animation: {
+            'pulse-once': 'pulseOnce 0.4s ease-out',
+            'fade-in': 'fadeIn 0.3s ease-out',
+            'slide-up': 'slideUp 0.4s ease-out',
+            'bounce-gentle': 'bounceGentle 0.6s ease-out',
+          },
+          keyframes: {
+            pulseOnce: {
+              '0%': { transform: 'scale(1)' },
+              '50%': { transform: 'scale(0.93)' },
+              '100%': { transform: 'scale(1)' },
+            },
+            fadeIn: {
+              '0%': { opacity: '0', transform: 'translateY(8px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            slideUp: {
+              '0%': { opacity: '0', transform: 'translateY(20px)' },
+              '100%': { opacity: '1', transform: 'translateY(0)' },
+            },
+            bounceGentle: {
+              '0%': { transform: 'scale(1)' },
+              '30%': { transform: 'scale(1.08)' },
+              '60%': { transform: 'scale(0.96)' },
+              '100%': { transform: 'scale(1)' },
+            },
+          },
+        },
+      },
+    };
+  </script>
+
+  <!-- React -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+
+  <!-- html2canvas -->
+  <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Noto Sans JP', sans-serif;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+      color: #fff;
+    }
+
+    /* ===== スクロールバー ===== */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+
+    /* ===== グラスモーフィズム ===== */
+    .glass {
+      background: rgba(255, 255, 255, 0.07);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px;
+    }
+    .glass-strong {
+      background: rgba(255, 255, 255, 0.13);
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(30px);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      border-radius: 24px;
+    }
+
+    /* ===== 理解度カラー ===== */
+    .level-1 { background: linear-gradient(135deg, #ef4444, #dc2626); }
+    .level-2 { background: linear-gradient(135deg, #f97316, #ea580c); }
+    .level-3 { background: linear-gradient(135deg, #eab308, #ca8a04); }
+    .level-4 { background: linear-gradient(135deg, #84cc16, #65a30d); }
+    .level-5 { background: linear-gradient(135deg, #22c55e, #16a34a); }
+
+    .level-1-soft { background: rgba(239, 68, 68, 0.15); border: 2px solid rgba(239, 68, 68, 0.4); }
+    .level-2-soft { background: rgba(249, 115, 22, 0.15); border: 2px solid rgba(249, 115, 22, 0.4); }
+    .level-3-soft { background: rgba(234, 179, 8, 0.15); border: 2px solid rgba(234, 179, 8, 0.4); }
+    .level-4-soft { background: rgba(132, 204, 22, 0.15); border: 2px solid rgba(132, 204, 22, 0.4); }
+    .level-5-soft { background: rgba(34, 197, 94, 0.15); border: 2px solid rgba(34, 197, 94, 0.4); }
+
+    /* ===== ボタン ===== */
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border: none;
+      color: white;
+      font-family: 'Noto Sans JP', sans-serif;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border-radius: 16px;
+      padding: 14px 28px;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+      box-shadow: 0 4px 20px rgba(99, 102, 241, 0.35);
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(99, 102, 241, 0.45); }
+    .btn-primary:active { transform: translateY(0); }
+
+    .btn-teacher {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4);
+    }
+    .btn-student {
+      background: linear-gradient(135deg, #ec4899, #db2777);
+      box-shadow: 0 8px 32px rgba(236, 72, 153, 0.4);
+    }
+    .btn-teacher:hover { box-shadow: 0 12px 40px rgba(99, 102, 241, 0.55); }
+    .btn-student:hover { box-shadow: 0 12px 40px rgba(236, 72, 153, 0.55); }
+
+    /* ===== 入力フィールド ===== */
+    .input-field {
+      background: rgba(255,255,255,0.08);
+      border: 1.5px solid rgba(255,255,255,0.2);
+      border-radius: 12px;
+      color: white;
+      font-family: 'Noto Sans JP', sans-serif;
+      font-size: 1rem;
+      padding: 12px 16px;
+      width: 100%;
+      transition: border-color 0.2s, background 0.2s;
+      outline: none;
+    }
+    .input-field:focus { border-color: rgba(139, 92, 246, 0.7); background: rgba(255,255,255,0.12); }
+    .input-field::placeholder { color: rgba(255,255,255,0.35); }
+    .input-field option { background: #1e1b4b; color: white; }
+
+    /* ===== 理解度ボタン ===== */
+    .level-btn {
+      border: none;
+      cursor: pointer;
+      font-family: 'M PLUS Rounded 1c', sans-serif;
+      font-weight: 800;
+      transition: all 0.2s ease;
+      border-radius: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      position: relative;
+      overflow: hidden;
+    }
+    .level-btn::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, rgba(255,255,255,0.15), transparent);
+      pointer-events: none;
+    }
+    .level-btn:hover { transform: translateY(-3px) scale(1.03); filter: brightness(1.1); }
+    .level-btn:active { transform: translateY(0) scale(0.97); }
+    .level-btn.selected {
+      transform: scale(1.06);
+      box-shadow: 0 0 0 4px rgba(255,255,255,0.5), 0 8px 24px rgba(0,0,0,0.3) !important;
+      filter: brightness(1.15);
+    }
+
+    /* ===== ステータスボタン ===== */
+    .status-btn {
+      border: 2px solid rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.07);
+      cursor: pointer;
+      font-family: 'Noto Sans JP', sans-serif;
+      font-weight: 700;
+      color: white;
+      transition: all 0.2s ease;
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px 12px;
+    }
+    .status-btn:hover { background: rgba(255,255,255,0.13); border-color: rgba(255,255,255,0.4); transform: translateY(-2px); }
+    .status-btn:active { transform: translateY(0); }
+    .status-btn.selected-teach { background: rgba(250, 204, 21, 0.2); border-color: rgba(250, 204, 21, 0.7); box-shadow: 0 0 20px rgba(250,204,21,0.2); }
+    .status-btn.selected-wait { background: rgba(147, 197, 253, 0.2); border-color: rgba(147, 197, 253, 0.7); box-shadow: 0 0 20px rgba(147,197,253,0.2); }
+    .status-btn.selected-help { background: rgba(252, 165, 165, 0.2); border-color: rgba(252, 165, 165, 0.7); box-shadow: 0 0 20px rgba(252,165,165,0.2); }
+    .status-btn.selected-solo { background: rgba(196, 181, 253, 0.2); border-color: rgba(196, 181, 253, 0.7); box-shadow: 0 0 20px rgba(196,181,253,0.2); }
+
+    /* ===== 児童カード ===== */
+    .student-card {
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 16px;
+      transition: all 0.3s ease;
+      animation: fadeIn 0.3s ease-out;
+      position: relative;
+      overflow: hidden;
+    }
+    .student-card.help-highlight {
+      border-color: rgba(252, 165, 165, 0.6);
+      background: rgba(252, 165, 165, 0.1);
+      box-shadow: 0 0 16px rgba(252, 165, 165, 0.2);
+    }
+
+    /* ===== フッター ===== */
+    .footer {
+      text-align: center;
+      padding: 12px;
+      color: rgba(255,255,255,0.35);
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      font-family: 'Noto Sans JP', sans-serif;
+    }
+
+    /* ===== 送信フラッシュ ===== */
+    @keyframes flashSend {
+      0% { opacity: 0; transform: scale(0.8); }
+      30% { opacity: 1; transform: scale(1); }
+      70% { opacity: 1; }
+      100% { opacity: 0; transform: scale(0.9); }
+    }
+    .flash-send {
+      animation: flashSend 1.2s ease-out forwards;
+    }
+
+    /* ===== スクロール非表示 ===== */
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    /* ===== ラベル ===== */
+    .form-label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 700;
+      color: rgba(255,255,255,0.6);
+      margin-bottom: 6px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    /* ===== バッジ ===== */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 9999px;
+      padding: 3px 10px;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .badge-help { background: rgba(252,165,165,0.25); color: #fca5a5; border: 1px solid rgba(252,165,165,0.4); }
+    .badge-teach { background: rgba(250,204,21,0.25); color: #fde047; border: 1px solid rgba(250,204,21,0.4); }
+    .badge-wait { background: rgba(147,197,253,0.25); color: #93c5fd; border: 1px solid rgba(147,197,253,0.4); }
+    .badge-solo { background: rgba(196,181,253,0.25); color: #c4b5fd; border: 1px solid rgba(196,181,253,0.4); }
+  </style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script type="text/babel">
+  const { useState, useEffect, useRef, useCallback } = React;
+
+  // ======================================================
+  // ★★★ Firebase 設定 ★★★
+  // Firebase コンソール（https://console.firebase.google.com/）で
+  // プロジェクトを作成し、「ウェブアプリを追加」後に表示される
+  // firebaseConfig の値をここに貼り付けてください。
+  // ======================================================
+  const firebaseConfig = {
+    apiKey: "AIzaSyAsYX7sKeUcPaew3WTXHygbL734Qa_NW1Q",
+    authDomain: "education-check.firebaseapp.com",
+    projectId: "education-check",
+    storageBucket: "education-check.firebasestorage.app",
+    messagingSenderId: "466153926634",
+    appId: "1:466153926634:web:cdc94cfd0e869b0b98cc93",
+    measurementId: "G-M33D5FJN59",
+  };
+  // ======================================================
+
+  // Firebase 初期化（Realtime Database）
+  let db = null;
+  let firebaseReady = false;
+  try {
+    if (!firebaseConfig.apiKey.startsWith('YOUR_')) {
+      firebase.initializeApp(firebaseConfig);
+      db = firebase.database();
+      firebaseReady = true;
+    }
+  } catch(e) {
+    console.warn('Firebase init error:', e);
+  }
+
+  // ======================================================
+  // 定数・ユーティリティ
+  // ======================================================
+  const SUBJECTS = ['算数', '国語', '理科', '社会', '英語', '体育', '図工', '音楽', '生活', 'その他'];
+
+  const STATUS_CONFIG = {
+    teach: { label: '教えたい！', emoji: '🙋', className: 'selected-teach', badgeClass: 'badge-teach', color: '#fde047' },
+    wait:  { label: 'もう少し待って', emoji: '⏳', className: 'selected-wait', badgeClass: 'badge-wait', color: '#93c5fd' },
+    help:  { label: '教えてください', emoji: '🆘', className: 'selected-help', badgeClass: 'badge-help', color: '#fca5a5' },
+    solo:  { label: '一人でやりたい', emoji: '👤', className: 'selected-solo', badgeClass: 'badge-solo', color: '#c4b5fd' },
+  };
+
+  const LEVEL_CONFIG = [
+    { level: 1, label: 'まだ難しい', emoji: '😢', className: 'level-1', shadow: 'rgba(239,68,68,0.4)' },
+    { level: 2, label: 'むずかしい', emoji: '😕', className: 'level-2', shadow: 'rgba(249,115,22,0.4)' },
+    { level: 3, label: 'ふつう',     emoji: '😐', className: 'level-3', shadow: 'rgba(234,179,8,0.4)' },
+    { level: 4, label: 'だいたい OK', emoji: '😊', className: 'level-4', shadow: 'rgba(132,204,22,0.4)' },
+    { level: 5, label: 'ばっちり！', emoji: '🎉', className: 'level-5', shadow: 'rgba(34,197,94,0.4)' },
+  ];
+
+  function generateClassId() {
+    return String(Math.floor(10000 + Math.random() * 90000));
+  }
+
+  function formatTime(date) {
+    return date.toLocaleString('ja-JP', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+  }
+
+  // デバウンス（1秒）
+  function useDebounce(fn, delay = 1000) {
+    const timerRef = useRef(null);
+    return useCallback((...args) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => fn(...args), delay);
+    }, [fn, delay]);
+  }
+
+  // ======================================================
+  // Firebase 操作
+  // ======================================================
+  async function initClass(classId, subject) {
+    if (!firebaseReady) return;
+    const ref = db.ref(`classes/${classId}`);
+    const snap = await ref.once('value');
+    if (!snap.exists()) {
+      await ref.set({
+        subject,
+        createdAt: firebase.database.ServerValue.TIMESTAMP,
+        students: {}
+      });
+    }
+  }
+
+  async function updateStudent(classId, studentKey, data) {
+    if (!firebaseReady) { console.log('[MOCK] updateStudent', classId, studentKey, data); return; }
+    const ref = db.ref(`classes/${classId}/students/${studentKey}`);
+    await ref.update({
+      ...data,
+      updatedAt: firebase.database.ServerValue.TIMESTAMP
+    });
+  }
+
+  function subscribeClass(classId, callback) {
+    if (!firebaseReady) return () => {};
+    const ref = db.ref(`classes/${classId}`);
+    const handler = snap => {
+      if (snap.exists()) callback(snap.val());
+    };
+    ref.on('value', handler);
+    return () => ref.off('value', handler);
+  }
+
+  // ======================================================
+  // フッターコンポーネント
+  // ======================================================
+  function Footer() {
+    return (
+      <footer className="footer">
+        <span>まなびメーター</span>
+        <span className="mx-2">|</span>
+        <span>作成者：黒田先生</span>
+      </footer>
+    );
+  }
+
+  // ======================================================
+  // モード選択画面
+  // ======================================================
+  function ModeSelectScreen({ onSelectTeacher, onSelectStudent }) {
+    return (
+      <div className="min-h-screen flex flex-col">
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-12">
+          {/* ロゴ・タイトル */}
+          <div className="text-center mb-10 animate-slide-up">
+            <div className="text-6xl mb-4">📊</div>
+            <h1 className="text-4xl font-black text-white mb-2" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif', letterSpacing: '-0.02em'}}>
+              まなびメーター
+            </h1>
+            <p className="text-sm text-white/50 tracking-widest font-medium">リアルタイム理解度共有システム</p>
+          </div>
+
+          {/* モード選択 */}
+          <div className="w-full max-w-sm glass-strong p-8 animate-fade-in">
+            <p className="text-center text-white/70 text-sm font-medium mb-6 tracking-wide">
+              あなたは どちらですか？
+            </p>
+            <div className="flex flex-col gap-4">
+              <button
+                id="btn-teacher-mode"
+                onClick={onSelectTeacher}
+                className="btn-primary btn-teacher w-full py-5 text-xl rounded-2xl flex items-center justify-center gap-3"
+                style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}
+              >
+                <span className="text-3xl">👩‍🏫</span>
+                <span>先生</span>
+              </button>
+              <button
+                id="btn-student-mode"
+                onClick={onSelectStudent}
+                className="btn-primary btn-student w-full py-5 text-xl rounded-2xl flex items-center justify-center gap-3"
+                style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}
+              >
+                <span className="text-3xl">🧒</span>
+                <span>こども</span>
+              </button>
+            </div>
+          </div>
+
+          {!firebaseReady && (
+            <div className="mt-6 glass p-4 max-w-sm w-full text-center">
+              <p className="text-yellow-300 text-xs font-bold">⚠️ デモモード（Firebase未接続）</p>
+              <p className="text-white/50 text-xs mt-1">index.html の firebaseConfig を設定してください</p>
+            </div>
+          )}
+        </div>
+        <Footer />
+      </div>
+    );
+  }
+
+  // ======================================================
+  // 教員セットアップ画面
+  // ======================================================
+  function TeacherSetupScreen({ onStartClass, onBack }) {
+    const [subject, setSubject] = useState('算数');
+    const [classId, setClassId] = useState(() => generateClassId());
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    const handleStart = async () => {
+      if (!classId.match(/^\d{5}$/)) { setError('授業IDは5桁の数字を入力してください'); return; }
+      setLoading(true);
+      setError('');
+      try {
+        await initClass(classId, subject);
+        onStartClass({ classId, subject });
+      } catch(e) {
+        setError('エラーが発生しました: ' + e.message);
+        setLoading(false);
+      }
+    };
+
+    return (
+      <div className="min-h-screen flex flex-col">
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-12">
+          <div className="w-full max-w-md animate-slide-up">
+            {/* ヘッダー */}
+            <button onClick={onBack} className="text-white/40 hover:text-white/70 transition-colors text-sm mb-6 flex items-center gap-1">
+              ← もどる
+            </button>
+            <div className="text-center mb-8">
+              <div className="text-5xl mb-3">👩‍🏫</div>
+              <h2 className="text-2xl font-black text-white" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>
+                先生セットアップ
+              </h2>
+              <p className="text-white/50 text-sm mt-1">授業の設定をしてください</p>
+            </div>
+
+            <div className="glass-strong p-8 flex flex-col gap-6">
+              {/* 教科選択 */}
+              <div>
+                <label className="form-label">📚 教科</label>
+                <select
+                  id="teacher-subject-select"
+                  value={subject}
+                  onChange={e => setSubject(e.target.value)}
+                  className="input-field"
+                >
+                  {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+
+              {/* 授業ID */}
+              <div>
+                <label className="form-label">🔑 授業ID（5桁）</label>
+                <div className="flex gap-2">
+                  <input
+                    id="teacher-class-id-input"
+                    type="text"
+                    value={classId}
+                    onChange={e => setClassId(e.target.value.replace(/\D/g, '').slice(0,5))}
+                    maxLength={5}
+                    className="input-field text-2xl font-black tracking-[0.3em] text-center"
+                    style={{fontFamily: 'monospace'}}
+                    placeholder="12345"
+                  />
+                  <button
+                    id="teacher-regen-id-btn"
+                    onClick={() => setClassId(generateClassId())}
+                    className="px-4 py-2 rounded-xl text-white/60 hover:text-white transition-colors text-xl"
+                    style={{background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', minWidth: '48px'}}
+                    title="IDを再生成"
+                  >
+                    🔄
+                  </button>
+                </div>
+                <p className="text-white/40 text-xs mt-2">このIDをこどもたちに伝えてください</p>
+              </div>
+
+              {/* 授業IDプレビュー */}
+              <div className="rounded-xl p-4 text-center" style={{background: 'rgba(99,102,241,0.15)', border: '1px dashed rgba(99,102,241,0.4)'}}>
+                <p className="text-white/50 text-xs font-bold tracking-widest mb-1">授業ID</p>
+                <p className="text-5xl font-black tracking-[0.3em] text-indigo-300" style={{fontFamily: 'monospace'}}>
+                  {classId || '- - - - -'}
+                </p>
+                <p className="text-white/40 text-xs mt-1">{subject}</p>
+              </div>
+
+              {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+
+              <button
+                id="teacher-start-btn"
+                onClick={handleStart}
+                disabled={loading}
+                className="btn-primary btn-teacher w-full py-4 text-lg rounded-2xl"
+                style={{fontFamily: '"M PLUS Rounded 1c", sans-serif', opacity: loading ? 0.7 : 1}}
+              >
+                {loading ? '準備中…' : '授業開始（投影画面へ）🚀'}
+              </button>
+            </div>
+          </div>
+        </div>
+        <Footer />
+      </div>
+    );
+  }
+
+  // ======================================================
+  // 教員ダッシュボード
+  // ======================================================
+  function TeacherDashboard({ classId, subject, onBack }) {
+    const [classData, setClassData] = useState(null);
+    const [filter, setFilter] = useState('all'); // all | help | teach | wait | solo
+    const [saving, setSaving] = useState(false);
+    const dashboardRef = useRef(null);
+    const startTime = useRef(new Date());
+
+    useEffect(() => {
+      const unsub = subscribeClass(classId, data => setClassData(data));
+      return () => unsub();
+    }, [classId]);
+
+    const students = classData ? Object.entries(classData.students || {}) : [];
+    const filtered = filter === 'all'
+      ? students
+      : students.filter(([, s]) => s.status === filter);
+
+    // 統計
+    const totalCount = students.length;
+    const helpCount = students.filter(([,s]) => s.status === 'help').length;
+    const avgLevel = totalCount > 0
+      ? (students.reduce((sum, [,s]) => sum + (s.understanding || 0), 0) / totalCount).toFixed(1)
+      : '-';
+
+    // 画像保存
+    const handleSaveImage = async () => {
+      if (!dashboardRef.current) return;
+      setSaving(true);
+      try {
+        const canvas = await html2canvas(dashboardRef.current, {
+          backgroundColor: '#0f0c29',
+          scale: 2,
+          useCORS: true,
+          logging: false,
+        });
+        const link = document.createElement('a');
+        link.download = `まなびメーター_${subject}_${classId}_${new Date().toISOString().slice(0,10)}.png`;
+        link.href = canvas.toDataURL('image/png');
+        link.click();
+      } catch(e) {
+        alert('画像保存に失敗しました: ' + e.message);
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    const FILTER_TABS = [
+      { key: 'all', label: 'すべて', emoji: '👥' },
+      { key: 'help', label: '教えて', emoji: '🆘' },
+      { key: 'teach', label: '教えたい', emoji: '🙋' },
+      { key: 'wait', label: '待って', emoji: '⏳' },
+      { key: 'solo', label: '一人で', emoji: '👤' },
+    ];
+
+    return (
+      <div className="min-h-screen flex flex-col">
+        {/* ヘッダー */}
+        <div className="sticky top-0 z-10" style={{background: 'rgba(15,12,41,0.85)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(255,255,255,0.08)'}}>
+          <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+            {/* タイトル */}
+            <div className="flex items-center gap-3 flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">📊</span>
+                <div>
+                  <h2 className="text-white font-black text-base leading-tight" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>
+                    {subject}の授業
+                  </h2>
+                  <p className="text-white/40 text-xs font-mono">ID: {classId}</p>
+                </div>
+              </div>
+              {/* ライブバッジ */}
+              <div className="flex items-center gap-1 px-2 py-0.5 rounded-full" style={{background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.3)'}}>
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse inline-block"></span>
+                <span className="text-green-400 text-xs font-bold">LIVE</span>
+              </div>
+            </div>
+
+            {/* 統計 */}
+            <div className="flex gap-4 text-center">
+              <div>
+                <p className="text-white font-black text-xl leading-none">{totalCount}</p>
+                <p className="text-white/40 text-xs">参加</p>
+              </div>
+              <div>
+                <p className="text-red-400 font-black text-xl leading-none">{helpCount}</p>
+                <p className="text-white/40 text-xs">SOS</p>
+              </div>
+              <div>
+                <p className="text-green-400 font-black text-xl leading-none">{avgLevel}</p>
+                <p className="text-white/40 text-xs">平均</p>
+              </div>
+            </div>
+
+            {/* ボタン */}
+            <div className="flex gap-2">
+              <button
+                id="teacher-save-btn"
+                onClick={handleSaveImage}
+                disabled={saving}
+                className="px-3 py-2 rounded-xl text-sm font-bold transition-all"
+                style={{background: 'rgba(99,102,241,0.2)', border: '1px solid rgba(99,102,241,0.4)', color: '#a5b4fc', opacity: saving ? 0.6 : 1}}
+              >
+                {saving ? '保存中…' : '📷 画像保存'}
+              </button>
+              <button
+                id="teacher-end-btn"
+                onClick={onBack}
+                className="px-3 py-2 rounded-xl text-sm font-bold transition-all"
+                style={{background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.5)'}}
+              >
+                終了
+              </button>
+            </div>
+          </div>
+
+          {/* フィルタータブ */}
+          <div className="max-w-7xl mx-auto px-4 pb-2 flex gap-2 overflow-x-auto no-scrollbar">
+            {FILTER_TABS.map(tab => (
+              <button
+                key={tab.key}
+                id={`filter-${tab.key}`}
+                onClick={() => setFilter(tab.key)}
+                className="flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition-all"
+                style={{
+                  background: filter === tab.key ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.07)',
+                  border: filter === tab.key ? '1px solid rgba(99,102,241,0.6)' : '1px solid rgba(255,255,255,0.1)',
+                  color: filter === tab.key ? '#c7d2fe' : 'rgba(255,255,255,0.5)',
+                }}
+              >
+                {tab.emoji} {tab.label}
+                {tab.key !== 'all' && (
+                  <span className="ml-1 opacity-70">
+                    ({students.filter(([,s]) => s.status === tab.key).length})
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* ダッシュボード本体（画像保存対象） */}
+        <div ref={dashboardRef} className="flex-1 max-w-7xl mx-auto w-full px-4 py-6">
+          {/* 保存時に表示するヘッダー情報 */}
+          <div className="hidden-in-screen mb-4 glass p-3 flex items-center gap-3" style={{display:'none'}} id="save-header">
+            <span className="text-2xl">📊</span>
+            <div>
+              <p className="font-black text-white">{subject}の授業 | ID: {classId}</p>
+              <p className="text-white/50 text-xs">{formatTime(startTime.current)} | 作成者：黒田先生</p>
+            </div>
+          </div>
+
+          {filtered.length === 0 ? (
+            <div className="text-center py-20 animate-fade-in">
+              <div className="text-5xl mb-4">
+                {filter === 'all' ? '⏰' : STATUS_CONFIG[filter]?.emoji}
+              </div>
+              <p className="text-white/40 text-sm">
+                {filter === 'all' ? 'こどもたちの参加を待っています…' : `「${STATUS_CONFIG[filter]?.label}」の児童はいません`}
+              </p>
+            </div>
+          ) : (
+            <div className="grid gap-3" style={{gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))'}}>
+              {filtered.map(([key, student]) => (
+                <StudentCard key={key} studentKey={key} student={student} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <Footer />
+      </div>
+    );
+  }
+
+  // ======================================================
+  // 児童カードコンポーネント
+  // ======================================================
+  function StudentCard({ studentKey, student }) {
+    const lvCfg = LEVEL_CONFIG.find(l => l.level === student.understanding) || LEVEL_CONFIG[2];
+    const stCfg = STATUS_CONFIG[student.status];
+    const isHelp = student.status === 'help';
+
+    return (
+      <div className={`student-card p-4 ${isHelp ? 'help-highlight' : ''}`}>
+        {/* 名前 */}
+        <p className="text-white font-bold text-sm truncate mb-2" title={student.name}>
+          {student.name || studentKey}
+        </p>
+
+        {/* 理解度バー */}
+        <div className="flex items-center gap-2 mb-2">
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-black text-sm ${lvCfg.className}`}
+            style={{boxShadow: `0 0 10px ${lvCfg.shadow}`}}>
+            {student.understanding || '-'}
+          </div>
+          <div className="flex-1">
+            <div className="w-full rounded-full h-1.5" style={{background: 'rgba(255,255,255,0.1)'}}>
+              <div
+                className={`h-1.5 rounded-full ${lvCfg.className}`}
+                style={{width: `${(student.understanding || 0) * 20}%`, transition: 'width 0.4s ease'}}
+              />
+            </div>
+            <p className="text-white/40 text-xs mt-0.5">{lvCfg.label}</p>
+          </div>
+        </div>
+
+        {/* ステータス */}
+        {stCfg && (
+          <div className={`badge ${stCfg.badgeClass} w-full justify-center`}>
+            <span>{stCfg.emoji}</span>
+            <span>{stCfg.label}</span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ======================================================
+  // 児童参加画面
+  // ======================================================
+  function StudentJoinScreen({ onJoin, onBack }) {
+    const [subject, setSubject] = useState('算数');
+    const [classId, setClassId] = useState('');
+    const [name, setName] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    const handleJoin = async () => {
+      if (!classId.match(/^\d{5}$/)) { setError('授業IDは5桁の数字を入力してください'); return; }
+      if (!name.trim()) { setError('名前か出席番号を入力してください'); return; }
+      setLoading(true);
+      setError('');
+
+      // こどもモードはFirestoreに接続確認せずそのまま参加
+      // （先生が授業を開始していない場合は初回送信時に自動作成）
+      onJoin({ classId: classId.trim(), subject, name: name.trim() });
+    };
+
+    return (
+      <div className="min-h-screen flex flex-col">
+        <div className="flex-1 flex flex-col items-center justify-center px-6 py-12">
+          <div className="w-full max-w-md animate-slide-up">
+            <button onClick={onBack} className="text-white/40 hover:text-white/70 transition-colors text-sm mb-6 flex items-center gap-1">
+              ← もどる
+            </button>
+            <div className="text-center mb-8">
+              <div className="text-5xl mb-3">🧒</div>
+              <h2 className="text-2xl font-black text-white" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>
+                じゅぎょうに参加する
+              </h2>
+              <p className="text-white/50 text-sm mt-1">先生から聞いた情報を入力してね</p>
+            </div>
+
+            <div className="glass-strong p-8 flex flex-col gap-5">
+              {/* 教科 */}
+              <div>
+                <label className="form-label">📚 教科</label>
+                <select id="student-subject-select" value={subject} onChange={e => setSubject(e.target.value)} className="input-field">
+                  {SUBJECTS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+
+              {/* 授業ID */}
+              <div>
+                <label className="form-label">🔑 授業ID（5桁）</label>
+                <input
+                  id="student-class-id-input"
+                  type="tel"
+                  value={classId}
+                  onChange={e => setClassId(e.target.value.replace(/\D/g, '').slice(0,5))}
+                  maxLength={5}
+                  className="input-field text-3xl font-black tracking-[0.3em] text-center"
+                  style={{fontFamily: 'monospace'}}
+                  placeholder="12345"
+                />
+              </div>
+
+              {/* 名前 */}
+              <div>
+                <label className="form-label">🏷️ 名前 または 出席番号</label>
+                <input
+                  id="student-name-input"
+                  type="text"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                  className="input-field text-lg"
+                  placeholder="例：田中 / 1番"
+                  maxLength={20}
+                />
+              </div>
+
+              {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+
+              <button
+                id="student-join-btn"
+                onClick={handleJoin}
+                disabled={loading}
+                className="btn-primary btn-student w-full py-4 text-lg rounded-2xl"
+                style={{fontFamily: '"M PLUS Rounded 1c", sans-serif', opacity: loading ? 0.7 : 1}}
+              >
+                {loading ? '参加中…' : '参加する 🎉'}
+              </button>
+            </div>
+          </div>
+        </div>
+        <Footer />
+      </div>
+    );
+  }
+
+  // ======================================================
+  // 児童入力画面（送信専用）
+  // ======================================================
+  function StudentInputScreen({ classId, subject, name, onBack }) {
+    const [understanding, setUnderstanding] = useState(null);
+    const [status, setStatus] = useState(null);
+    const [sendFlash, setSendFlash] = useState(false);
+    const [lastSent, setLastSent] = useState(null);
+    const [pendingUpdate, setPendingUpdate] = useState(false);
+
+    // 児童のキー（名前をキーに使用。スペース等を除去）
+    const studentKey = name.replace(/[.#$/\[\]]/g, '_');
+
+    // Firestoreへ送信（デバウンス1秒）
+    const sendToFirestore = useCallback(async (newUnderstanding, newStatus) => {
+      if (!newUnderstanding && !newStatus) return;
+      setPendingUpdate(false);
+      try {
+        await updateStudent(classId, studentKey, {
+          name,
+          understanding: newUnderstanding,
+          status: newStatus,
+        });
+        setLastSent(new Date());
+        setSendFlash(true);
+        setTimeout(() => setSendFlash(false), 1200);
+      } catch(e) {
+        console.error('送信エラー:', e);
+      }
+    }, [classId, studentKey, name]);
+
+    const debouncedSend = useDebounce(sendToFirestore, 1000);
+
+    const handleLevelSelect = (level) => {
+      setUnderstanding(level);
+      setPendingUpdate(true);
+      debouncedSend(level, status);
+    };
+
+    const handleStatusSelect = (s) => {
+      setStatus(s);
+      setPendingUpdate(true);
+      debouncedSend(understanding, s);
+    };
+
+    const lvCfg = understanding ? LEVEL_CONFIG.find(l => l.level === understanding) : null;
+
+    return (
+      <div className="min-h-screen flex flex-col">
+        {/* ヘッダー */}
+        <div className="sticky top-0 z-10 px-4 py-3 flex items-center justify-between"
+          style={{background: 'rgba(15,12,41,0.85)', backdropFilter: 'blur(20px)', borderBottom: '1px solid rgba(255,255,255,0.08)'}}>
+          <div>
+            <p className="text-white font-bold text-sm">{name}</p>
+            <p className="text-white/40 text-xs">{subject} | ID: {classId}</p>
+          </div>
+
+          {/* 送信状態インジケーター */}
+          <div className="flex items-center gap-2">
+            {pendingUpdate && (
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse inline-block"></span>
+                <span className="text-yellow-300 text-xs">送信中…</span>
+              </div>
+            )}
+            {!pendingUpdate && lastSent && (
+              <div className="flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block"></span>
+                <span className="text-green-300 text-xs">送信済み ✓</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 送信フラッシュ */}
+        {sendFlash && (
+          <div className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none">
+            <div className="flash-send glass-strong px-8 py-4 text-center">
+              <div className="text-3xl mb-1">✅</div>
+              <p className="text-white font-bold text-sm">先生に伝わったよ！</p>
+            </div>
+          </div>
+        )}
+
+        <div className="flex-1 flex flex-col gap-6 px-4 py-6 max-w-lg mx-auto w-full">
+          {/* 理解度セクション */}
+          <div className="glass p-5">
+            <h3 className="text-center font-black text-lg text-white mb-1" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>
+              いまの理解度は？
+            </h3>
+            <p className="text-center text-white/40 text-xs mb-4">ボタンをおして先生に伝えよう</p>
+
+            {/* 5段階ボタン */}
+            <div className="grid grid-cols-5 gap-2">
+              {LEVEL_CONFIG.map(cfg => (
+                <button
+                  key={cfg.level}
+                  id={`level-btn-${cfg.level}`}
+                  onClick={() => handleLevelSelect(cfg.level)}
+                  className={`level-btn ${cfg.className} ${understanding === cfg.level ? 'selected' : ''}`}
+                  style={{
+                    aspectRatio: '1',
+                    boxShadow: understanding === cfg.level ? `0 0 20px ${cfg.shadow}` : `0 4px 12px ${cfg.shadow}`,
+                    color: 'white',
+                    fontSize: 'clamp(0.6rem, 2vw, 0.75rem)',
+                    padding: '6px 4px',
+                  }}
+                >
+                  <span style={{fontSize: 'clamp(1.2rem, 4vw, 1.6rem)'}}>{cfg.emoji}</span>
+                  <span className="font-black" style={{fontSize: 'clamp(1rem, 3vw, 1.3rem)'}}>{cfg.level}</span>
+                  <span className="font-bold leading-tight text-center px-1" style={{fontSize: 'clamp(0.55rem, 1.8vw, 0.7rem)', opacity: 0.9}}>
+                    {cfg.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            {/* 選択中インジケーター */}
+            {lvCfg && (
+              <div className={`mt-3 rounded-xl p-2 text-center ${lvCfg.className}`} style={{background: 'rgba(255,255,255,0.1)'}}>
+                <p className="text-white font-bold text-sm">
+                  {lvCfg.emoji} レベル {lvCfg.level}「{lvCfg.label}」を選択中
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* 意思表示セクション */}
+          <div className="glass p-5">
+            <h3 className="text-center font-black text-lg text-white mb-1" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>
+              いまの気持ちは？
+            </h3>
+            <p className="text-center text-white/40 text-xs mb-4">先生に伝えたいことをえらぼう</p>
+
+            <div className="grid grid-cols-2 gap-3">
+              {Object.entries(STATUS_CONFIG).map(([key, cfg]) => (
+                <button
+                  key={key}
+                  id={`status-btn-${key}`}
+                  onClick={() => handleStatusSelect(key)}
+                  className={`status-btn ${status === key ? cfg.className : ''}`}
+                  style={{minHeight: '70px', fontSize: '0.82rem'}}
+                >
+                  <span style={{fontSize: '1.4rem'}}>{cfg.emoji}</span>
+                  <span className="font-bold leading-tight text-center">{cfg.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 未選択の場合のヒント */}
+          {!understanding && !status && (
+            <div className="text-center py-2 animate-fade-in">
+              <p className="text-white/30 text-sm">👆 ボタンをおして先生に伝えよう！</p>
+            </div>
+          )}
+        </div>
+
+        <Footer />
+      </div>
+    );
+  }
+
+  // ======================================================
+  // メインアプリコンポーネント
+  // ======================================================
+  function App() {
+    const [screen, setScreen] = useState('mode-select'); // mode-select | teacher-setup | teacher-dashboard | student-join | student-input
+    const [teacherInfo, setTeacherInfo] = useState(null);
+    const [studentInfo, setStudentInfo] = useState(null);
+
+    const handleTeacherStart = (info) => {
+      setTeacherInfo(info);
+      setScreen('teacher-dashboard');
+    };
+
+    const handleStudentJoin = (info) => {
+      setStudentInfo(info);
+      setScreen('student-input');
+    };
+
+    return (
+      <div className="min-h-screen">
+        {screen === 'mode-select' && (
+          <ModeSelectScreen
+            onSelectTeacher={() => setScreen('teacher-setup')}
+            onSelectStudent={() => setScreen('student-join')}
+          />
+        )}
+        {screen === 'teacher-setup' && (
+          <TeacherSetupScreen
+            onStartClass={handleTeacherStart}
+            onBack={() => setScreen('mode-select')}
+          />
+        )}
+        {screen === 'teacher-dashboard' && teacherInfo && (
+          <TeacherDashboard
+            classId={teacherInfo.classId}
+            subject={teacherInfo.subject}
+            onBack={() => setScreen('mode-select')}
+          />
+        )}
+        {screen === 'student-join' && (
+          <StudentJoinScreen
+            onJoin={handleStudentJoin}
+            onBack={() => setScreen('mode-select')}
+          />
+        )}
+        {screen === 'student-input' && studentInfo && (
+          <StudentInputScreen
+            classId={studentInfo.classId}
+            subject={studentInfo.subject}
+            name={studentInfo.name}
+            onBack={() => setScreen('mode-select')}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ======================================================
+  // レンダリング
+  // ======================================================
+  const root = ReactDOM.createRoot(document.getElementById('root'));
+  root.render(<App />);
+</script>
+</body>
+</html>
