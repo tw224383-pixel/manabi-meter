@@ -79,6 +79,9 @@
 
   <!-- html2canvas -->
   <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+  
+  <!-- QRCode -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 
   <style>
     * { box-sizing: border-box; }
@@ -625,13 +628,30 @@
     const [classData, setClassData] = useState(null);
     const [filter, setFilter] = useState('all'); // all | help | teach | wait | solo
     const [saving, setSaving] = useState(false);
+    const [showQR, setShowQR] = useState(false);
     const dashboardRef = useRef(null);
+    const qrCanvasRef = useRef(null);
     const startTime = useRef(new Date());
 
     useEffect(() => {
       const unsub = subscribeClass(classId, data => setClassData(data));
       return () => unsub();
     }, [classId]);
+
+    // QRコードの描画
+    useEffect(() => {
+      if (showQR && qrCanvasRef.current && window.QRCode) {
+        const baseUrl = window.location.href.split('?')[0];
+        const joinUrl = `${baseUrl}?classId=${classId}&subject=${encodeURIComponent(subject)}`;
+        window.QRCode.toCanvas(qrCanvasRef.current, joinUrl, {
+          width: 256,
+          margin: 2,
+          color: { dark: '#000000', light: '#ffffff' }
+        }, (error) => {
+          if (error) console.error('QR生成エラー:', error);
+        });
+      }
+    }, [showQR, classId, subject]);
 
     // 授業終了：データを削除して戻る
     const handleEndClass = async () => {
@@ -731,6 +751,13 @@
             {/* ボタン */}
             <div className="flex gap-2">
               <button
+                onClick={() => setShowQR(true)}
+                className="px-3 py-2 rounded-xl text-sm font-bold transition-all"
+                style={{background: 'rgba(34,197,94,0.2)', border: '1px solid rgba(34,197,94,0.4)', color: '#86efac'}}
+              >
+                📱 QR参加
+              </button>
+              <button
                 id="teacher-save-btn"
                 onClick={handleSaveImage}
                 disabled={saving}
@@ -804,6 +831,25 @@
           )}
         </div>
 
+        {/* QRコードモーダル */}
+        {showQR && (
+          <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(5px)'}}>
+            <div className="glass-strong p-6 rounded-3xl max-w-sm w-full text-center relative animate-fade-in">
+              <button onClick={() => setShowQR(false)} className="absolute top-4 right-4 text-white/50 hover:text-white text-xl">
+                ✕
+              </button>
+              <h3 className="text-xl font-black text-white mb-2" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>参加用QRコード</h3>
+              <p className="text-white/60 text-xs mb-6">こどもたちの端末で読み取ってください<br/>IDと教科が自動で入力されます</p>
+              <div className="bg-white p-2 rounded-xl inline-block mx-auto mb-4">
+                <canvas ref={qrCanvasRef}></canvas>
+              </div>
+              <p className="text-3xl font-black tracking-[0.3em] text-indigo-300 mb-2" style={{fontFamily: 'monospace'}}>
+                {classId}
+              </p>
+            </div>
+          </div>
+        )}
+
         <Footer />
       </div>
     );
@@ -855,10 +901,10 @@
   // ======================================================
   // 児童参加画面
   // ======================================================
-  function StudentJoinScreen({ onJoin, onBack }) {
-    const [subject, setSubject] = useState('算数');
-    const [classId, setClassId] = useState('');
-    const [name, setName] = useState('');
+  function StudentJoinScreen({ onJoin, onBack, initialData }) {
+    const [subject, setSubject] = useState(initialData?.subject || '算数');
+    const [classId, setClassId] = useState(initialData?.classId || '');
+    const [name, setName] = useState(() => localStorage.getItem('manabi_student_name') || '');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
@@ -867,6 +913,9 @@
       if (!name.trim()) { setError('名前か出席番号を入力してください'); return; }
       setLoading(true);
       setError('');
+
+      // 名前をローカルストレージに保存
+      localStorage.setItem('manabi_student_name', name.trim());
 
       // こどもモードはFirestoreに接続確認せずそのまま参加
       // （先生が授業を開始していない場合は初回送信時に自動作成）
@@ -1119,6 +1168,19 @@
     const [screen, setScreen] = useState('mode-select'); // mode-select | teacher-setup | teacher-dashboard | student-join | student-input
     const [teacherInfo, setTeacherInfo] = useState(null);
     const [studentInfo, setStudentInfo] = useState(null);
+    const [initialJoinData, setInitialJoinData] = useState(null);
+
+    // URLパラメータの確認（QRコードからの遷移時）
+    useEffect(() => {
+      const params = new URLSearchParams(window.location.search);
+      const qClassId = params.get('classId');
+      const qSubject = params.get('subject');
+      
+      if (qClassId) {
+        setInitialJoinData({ classId: qClassId, subject: qSubject || '算数' });
+        setScreen('student-join');
+      }
+    }, []);
 
     const handleTeacherStart = (info) => {
       setTeacherInfo(info);
@@ -1153,6 +1215,7 @@
         )}
         {screen === 'student-join' && (
           <StudentJoinScreen
+            initialData={initialJoinData}
             onJoin={handleStudentJoin}
             onBack={() => setScreen('mode-select')}
           />
