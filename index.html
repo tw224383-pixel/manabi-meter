@@ -79,9 +79,6 @@
 
   <!-- html2canvas -->
   <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
-  
-  <!-- QRCode -->
-  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 
   <style>
     * { box-sizing: border-box; }
@@ -630,28 +627,12 @@
     const [saving, setSaving] = useState(false);
     const [showQR, setShowQR] = useState(false);
     const dashboardRef = useRef(null);
-    const qrCanvasRef = useRef(null);
     const startTime = useRef(new Date());
 
     useEffect(() => {
       const unsub = subscribeClass(classId, data => setClassData(data));
       return () => unsub();
     }, [classId]);
-
-    // QRコードの描画
-    useEffect(() => {
-      if (showQR && qrCanvasRef.current && window.QRCode) {
-        const baseUrl = window.location.href.split('?')[0];
-        const joinUrl = `${baseUrl}?classId=${classId}&subject=${encodeURIComponent(subject)}`;
-        window.QRCode.toCanvas(qrCanvasRef.current, joinUrl, {
-          width: 256,
-          margin: 2,
-          color: { dark: '#000000', light: '#ffffff' }
-        }, (error) => {
-          if (error) console.error('QR生成エラー:', error);
-        });
-      }
-    }, [showQR, classId, subject]);
 
     // 授業終了：データを削除して戻る
     const handleEndClass = async () => {
@@ -841,7 +822,12 @@
               <h3 className="text-xl font-black text-white mb-2" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>参加用QRコード</h3>
               <p className="text-white/60 text-xs mb-6">こどもたちの端末で読み取ってください<br/>IDと教科が自動で入力されます</p>
               <div className="bg-white p-2 rounded-xl inline-block mx-auto mb-4">
-                <canvas ref={qrCanvasRef}></canvas>
+                <img 
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(window.location.href.split('?')[0] + '?classId=' + classId + '&subject=' + subject)}`} 
+                  alt="QR Code" 
+                  width="256" 
+                  height="256" 
+                />
               </div>
               <p className="text-3xl font-black tracking-[0.3em] text-indigo-300 mb-2" style={{fontFamily: 'monospace'}}>
                 {classId}
