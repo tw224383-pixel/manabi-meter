@@ -292,6 +292,26 @@
     .badge-teach { background: rgba(250,204,21,0.25); color: #fde047; border: 1px solid rgba(250,204,21,0.4); }
     .badge-wait { background: rgba(147,197,253,0.25); color: #93c5fd; border: 1px solid rgba(147,197,253,0.4); }
     .badge-solo { background: rgba(196,181,253,0.25); color: #c4b5fd; border: 1px solid rgba(196,181,253,0.4); }
+    .badge-none { background: rgba(255,255,255,0.07); color: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.15); }
+    .badge-offline { background: rgba(148,163,184,0.22); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.35); }
+
+    /* ===== 離席（切断）中の児童カード ===== */
+    .student-card.offline { opacity: 0.45; }
+
+    /* ===== 未回答の理解度表示 ===== */
+    .level-none { background: rgba(255,255,255,0.12); }
+
+    /* ===== 画像保存中 =====
+       html2canvas は backdrop-filter を再現できないため、
+       保存中だけ半透明ガラスを不透明な代替背景に置き換える。 */
+    .capturing .glass,
+    .capturing .glass-strong {
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+      background: rgba(48, 43, 99, 0.92) !important;
+    }
+    .capturing .student-card { background: rgba(70, 64, 128, 0.9) !important; }
+    .capturing * { animation: none !important; transition: none !important; }
   </style>
 </head>
 <body>
@@ -299,7 +319,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-  const { useState, useEffect, useRef, useCallback } = React;
+  const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
   // ======================================================
   // ★★★ Firebase 設定 ★★★
@@ -359,47 +379,151 @@
     return date.toLocaleString('ja-JP', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
   }
 
-  // デバウンス（1秒）
+  // localStorage / sessionStorage はプライベートモードや file:// で例外を投げることがある
+  const safeStore = {
+    get(storage, key, fallback = null) {
+      try { const v = storage.getItem(key); return v === null ? fallback : v; }
+      catch(e) { return fallback; }
+    },
+    set(storage, key, value) {
+      try { storage.setItem(key, value); } catch(e) { /* 保存できなくても動作は継続 */ }
+    },
+    remove(storage, key) {
+      try { storage.removeItem(key); } catch(e) { /* noop */ }
+    },
+  };
+
+  // 端末ごとの識別子。同姓同名の児童がデータを上書きし合うのを防ぐ。
+  function getDeviceId() {
+    let id = safeStore.get(localStorage, 'manabi_device_id');
+    if (!id || !/^[a-z0-9]{6,}$/.test(id)) {
+      id = Math.random().toString(36).slice(2, 10);
+      safeStore.set(localStorage, 'manabi_device_id', id);
+    }
+    return id;
+  }
+
+  // URL パラメータ等、外部から来た教科名は必ず既定リストに丸める
+  function normalizeSubject(value) {
+    return SUBJECTS.includes(value) ? value : SUBJECTS[0];
+  }
+
+  function normalizeClassId(value) {
+    return String(value == null ? '' : value).replace(/\D/g, '').slice(0, 5);
+  }
+
+  // デバウンス（1秒）。最新の関数を参照し、アンマウント時にタイマーを破棄する。
   function useDebounce(fn, delay = 1000) {
     const timerRef = useRef(null);
+    const fnRef = useRef(fn);
+    useEffect(() => { fnRef.current = fn; }, [fn]);
+    useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
     return useCallback((...args) => {
       if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => fn(...args), delay);
-    }, [fn, delay]);
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        fnRef.current(...args);
+      }, delay);
+    }, [delay]);
   }
 
   // ======================================================
   // Firebase 操作
   // ======================================================
+  // 授業データの取得（存在しなければ null）
+  async function fetchClass(classId) {
+    if (!firebaseReady) return null;
+    const snap = await db.ref(`classes/${classId}`).once('value');
+    return snap.exists() ? (snap.val() || {}) : null;
+  }
+
+  // まだ使われていない授業IDを探す（ID重複による他クラスへの混入を防ぐ）
+  async function generateUniqueClassId() {
+    if (!firebaseReady) return generateClassId();
+    for (let i = 0; i < 20; i++) {
+      const id = generateClassId();
+      try {
+        if (!(await fetchClass(id))) return id;
+      } catch(e) {
+        return id; // 権限エラー等では確認を諦めて通常生成
+      }
+    }
+    return generateClassId();
+  }
+
+  // 授業を新規作成する。既に同じIDの授業がある場合は作成せず false を返す。
   async function initClass(classId, subject) {
-    if (!firebaseReady) return;
+    if (!firebaseReady) return true;
     const ref = db.ref(`classes/${classId}`);
     const snap = await ref.once('value');
+    if (snap.exists()) return false;
+    await ref.set({
+      subject,
+      createdAt: firebase.database.ServerValue.TIMESTAMP,
+      students: {}
+    });
+    return true;
+  }
+
+  // 児童が先に参加した授業には createdAt が無く、自動削除の対象になってしまう。
+  // 不足しているメタ情報だけを補う。
+  async function ensureClassMeta(classId, subject) {
+    if (!firebaseReady) return;
+    const ref = db.ref(`classes/${classId}`);
+    const snap = await ref.child('createdAt').once('value');
     if (!snap.exists()) {
-      await ref.set({
-        subject,
-        createdAt: firebase.database.ServerValue.TIMESTAMP,
-        students: {}
-      });
+      await ref.update({ subject, createdAt: firebase.database.ServerValue.TIMESTAMP });
     }
+  }
+
+  // Firebase の update() は null を渡すとそのキーを削除するため、未選択の項目は送らない
+  function omitEmpty(obj) {
+    const out = {};
+    Object.keys(obj).forEach(k => {
+      if (obj[k] !== null && obj[k] !== undefined) out[k] = obj[k];
+    });
+    return out;
   }
 
   async function updateStudent(classId, studentKey, data) {
     if (!firebaseReady) { console.log('[MOCK] updateStudent', classId, studentKey, data); return; }
     const ref = db.ref(`classes/${classId}/students/${studentKey}`);
     await ref.update({
-      ...data,
+      ...omitEmpty(data),
+      online: true,
       updatedAt: firebase.database.ServerValue.TIMESTAMP
     });
   }
 
+  // 端末が切断されたら自動で「離席」表示にする（タブを閉じた児童が残り続けるのを防ぐ）
+  function registerPresence(classId, studentKey) {
+    if (!firebaseReady) return () => {};
+    const ref = db.ref(`classes/${classId}/students/${studentKey}/online`);
+    ref.onDisconnect().set(false);
+    // 再読み込み後など、切断扱いのまま残っているレコードを接続中に戻す
+    ref.set(true).catch(() => {});
+    // markOffline=false で呼ぶと、退出処理（レコード削除）と競合しない
+    return (markOffline = true) => {
+      ref.onDisconnect().cancel().catch(() => {});
+      if (markOffline) ref.set(false).catch(() => {});
+    };
+  }
+
+  async function removeStudent(classId, studentKey) {
+    if (!firebaseReady) return;
+    await db.ref(`classes/${classId}/students/${studentKey}`).remove();
+  }
+
+  // 授業データの購読。削除された場合も null で通知する（古い表示が残らないように）。
   function subscribeClass(classId, callback) {
     if (!firebaseReady) return () => {};
     const ref = db.ref(`classes/${classId}`);
-    const handler = snap => {
-      if (snap.exists()) callback(snap.val());
+    const handler = snap => callback(snap.exists() ? (snap.val() || {}) : null, null);
+    const errorHandler = err => {
+      console.warn('subscribe error:', err);
+      callback(null, err);
     };
-    ref.on('value', handler);
+    ref.on('value', handler, errorHandler);
     return () => ref.off('value', handler);
   }
 
@@ -418,8 +542,10 @@
       if (!snap.exists()) return 0;
       const tasks = [];
       snap.forEach(child => {
-        const createdAt = child.val()?.createdAt || 0;
-        if (createdAt < cutoff) {
+        const createdAt = child.val()?.createdAt;
+        // createdAt が無いデータ（＝作成途中）を巻き添えで消さないよう、
+        // 数値として記録されているものだけを判定対象にする
+        if (typeof createdAt === 'number' && createdAt > 0 && createdAt < cutoff) {
           tasks.push(db.ref(`classes/${child.key}`).remove());
         }
       });
@@ -508,23 +634,50 @@
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [cleanedCount, setCleanedCount] = useState(0);
+    const [conflict, setConflict] = useState(null); // 使用中IDの情報
 
-    // 画面表示時に古いクラスを自動削除
+    // 画面表示時に古いクラスを自動削除し、未使用のIDを用意する
     useEffect(() => {
-      cleanupOldClasses(24).then(n => { if (n > 0) setCleanedCount(n); });
+      let alive = true;
+      cleanupOldClasses(24)
+        .then(n => { if (alive && n > 0) setCleanedCount(n); })
+        .then(() => generateUniqueClassId())
+        .then(id => { if (alive) setClassId(id); })
+        .catch(e => console.warn('初期化エラー:', e));
+      return () => { alive = false; };
     }, []);
+
+    const regenerateId = async () => {
+      setConflict(null);
+      setError('');
+      setClassId(await generateUniqueClassId());
+    };
 
     const handleStart = async () => {
       if (!classId.match(/^\d{5}$/)) { setError('授業IDは5桁の数字を入力してください'); return; }
       setLoading(true);
       setError('');
+      setConflict(null);
       try {
-        await initClass(classId, subject);
+        const created = await initClass(classId, subject);
+        if (!created) {
+          // 既に使われているIDを黙って使うと別の先生の授業に相乗りしてしまう
+          const existing = await fetchClass(classId);
+          setConflict({ subject: existing?.subject || '不明' });
+          setLoading(false);
+          return;
+        }
         onStartClass({ classId, subject });
       } catch(e) {
         setError('エラーが発生しました: ' + e.message);
         setLoading(false);
       }
+    };
+
+    // 自分の授業に戻る（再読み込み後の復帰など）
+    const handleRejoin = async () => {
+      const existing = await fetchClass(classId).catch(() => null);
+      onStartClass({ classId, subject: existing?.subject || subject });
     };
 
     return (
@@ -579,7 +732,7 @@
                   />
                   <button
                     id="teacher-regen-id-btn"
-                    onClick={() => setClassId(generateClassId())}
+                    onClick={regenerateId}
                     className="px-4 py-2 rounded-xl text-white/60 hover:text-white transition-colors text-xl"
                     style={{background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', minWidth: '48px'}}
                     title="IDを再生成"
@@ -600,6 +753,32 @@
               </div>
 
               {error && <p className="text-red-400 text-sm text-center">{error}</p>}
+
+              {conflict && (
+                <div className="rounded-xl p-4 text-center" style={{background: 'rgba(250,204,21,0.12)', border: '1px solid rgba(250,204,21,0.35)'}}>
+                  <p className="text-yellow-200 text-sm font-bold mb-1">⚠️ この授業ID（{classId}）は使用中です</p>
+                  <p className="text-white/60 text-xs mb-3">
+                    「{conflict.subject}」の授業で使われています。<br/>
+                    自分の授業に戻る場合のみ「続きから」を選んでください。
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={regenerateId}
+                      className="flex-1 px-3 py-2 rounded-xl text-sm font-bold"
+                      style={{background: 'rgba(99,102,241,0.25)', border: '1px solid rgba(99,102,241,0.45)', color: '#c7d2fe'}}
+                    >
+                      別のIDにする
+                    </button>
+                    <button
+                      onClick={handleRejoin}
+                      className="flex-1 px-3 py-2 rounded-xl text-sm font-bold"
+                      style={{background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.2)', color: 'rgba(255,255,255,0.8)'}}
+                    >
+                      続きから
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <button
                 id="teacher-start-btn"
@@ -623,6 +802,8 @@
   // ======================================================
   function TeacherDashboard({ classId, subject, onBack }) {
     const [classData, setClassData] = useState(null);
+    const [loaded, setLoaded] = useState(!firebaseReady);
+    const [connError, setConnError] = useState(null);
     const [filter, setFilter] = useState('all'); // all | help | teach | wait | solo
     const [saving, setSaving] = useState(false);
     const [showQR, setShowQR] = useState(false);
@@ -630,7 +811,11 @@
     const startTime = useRef(new Date());
 
     useEffect(() => {
-      const unsub = subscribeClass(classId, data => setClassData(data));
+      const unsub = subscribeClass(classId, (data, err) => {
+        setLoaded(true);
+        setConnError(err ? (err.message || '接続エラー') : null);
+        setClassData(data);
+      });
       return () => unsub();
     }, [classId]);
 
@@ -648,23 +833,45 @@
       onBack();
     };
 
-    const students = classData ? Object.entries(classData.students || {}) : [];
+    // 名前が未登録のレコード（切断時に online だけ書き込まれた残骸）は除外し、名前順に並べる
+    const students = useMemo(() => {
+      const entries = classData ? Object.entries(classData.students || {}) : [];
+      return entries
+        .filter(([, s]) => s && typeof s === 'object' && s.name)
+        .sort((a, b) => String(a[1].name).localeCompare(String(b[1].name), 'ja'));
+    }, [classData]);
+
     const filtered = filter === 'all'
       ? students
       : students.filter(([, s]) => s.status === filter);
 
-    // 統計
+    // 統計（理解度は「回答した児童」だけで平均する。未回答を0点として数えない）
     const totalCount = students.length;
     const helpCount = students.filter(([,s]) => s.status === 'help').length;
-    const avgLevel = totalCount > 0
-      ? (students.reduce((sum, [,s]) => sum + (s.understanding || 0), 0) / totalCount).toFixed(1)
+    const answered = students.filter(([,s]) => typeof s.understanding === 'number' && s.understanding > 0);
+    const avgLevel = answered.length > 0
+      ? (answered.reduce((sum, [,s]) => sum + s.understanding, 0) / answered.length).toFixed(1)
       : '-';
+
+    const classMissing = loaded && !connError && classData === null;
+
+    // 参加用URL（教科名などは URLSearchParams で正しくエスケープする）
+    const joinUrl = useMemo(() => {
+      const base = window.location.origin + window.location.pathname;
+      const params = new URLSearchParams({ classId, subject });
+      return `${base}?${params.toString()}`;
+    }, [classId, subject]);
 
     // 画像保存
     const handleSaveImage = async () => {
       if (!dashboardRef.current) return;
       setSaving(true);
+      // 保存用ヘッダーを表示し、ガラス効果を html2canvas が描ける背景に差し替える
+      document.body.classList.add('capturing');
       try {
+        // スタイル変更を反映させてから撮影する
+        // （requestAnimationFrame は非表示タブでは発火しないので setTimeout を使う）
+        await new Promise(r => setTimeout(r, 100));
         const canvas = await html2canvas(dashboardRef.current, {
           backgroundColor: '#0f0c29',
           scale: 2,
@@ -674,10 +881,13 @@
         const link = document.createElement('a');
         link.download = `まなびメーター_${subject}_${classId}_${new Date().toISOString().slice(0,10)}.png`;
         link.href = canvas.toDataURL('image/png');
+        document.body.appendChild(link);
         link.click();
+        document.body.removeChild(link);
       } catch(e) {
         alert('画像保存に失敗しました: ' + e.message);
       } finally {
+        document.body.classList.remove('capturing');
         setSaving(false);
       }
     };
@@ -723,9 +933,9 @@
                 <p className="text-red-400 font-black text-xl leading-none">{helpCount}</p>
                 <p className="text-white/40 text-xs">SOS</p>
               </div>
-              <div>
+              <div title={`理解度を回答した児童 ${answered.length} 人の平均`}>
                 <p className="text-green-400 font-black text-xl leading-none">{avgLevel}</p>
-                <p className="text-white/40 text-xs">平均</p>
+                <p className="text-white/40 text-xs">平均({answered.length})</p>
               </div>
             </div>
 
@@ -785,16 +995,54 @@
 
         {/* ダッシュボード本体（画像保存対象） */}
         <div ref={dashboardRef} className="flex-1 max-w-7xl mx-auto w-full px-4 py-6">
-          {/* 保存時に表示するヘッダー情報 */}
-          <div className="hidden-in-screen mb-4 glass p-3 flex items-center gap-3" style={{display:'none'}} id="save-header">
-            <span className="text-2xl">📊</span>
-            <div>
-              <p className="font-black text-white">{subject}の授業 | ID: {classId}</p>
-              <p className="text-white/50 text-xs">{formatTime(startTime.current)} | 作成者：黒田先生</p>
+          {/* 保存時のみ表示するヘッダー情報（画像に授業名・時刻・統計を残す） */}
+          {saving && (
+            <div className="mb-4 glass p-3 flex items-center gap-4" id="save-header">
+              <span className="text-2xl">📊</span>
+              <div className="flex-1">
+                <p className="font-black text-white">{subject}の授業 | ID: {classId}</p>
+                <p className="text-white/50 text-xs">{formatTime(new Date())} | 作成者：黒田先生</p>
+              </div>
+              <div className="flex gap-4 text-center">
+                <div>
+                  <p className="text-white font-black text-lg leading-none">{totalCount}</p>
+                  <p className="text-white/40 text-xs">参加</p>
+                </div>
+                <div>
+                  <p className="text-red-400 font-black text-lg leading-none">{helpCount}</p>
+                  <p className="text-white/40 text-xs">SOS</p>
+                </div>
+                <div>
+                  <p className="text-green-400 font-black text-lg leading-none">{avgLevel}</p>
+                  <p className="text-white/40 text-xs">平均</p>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
 
-          {filtered.length === 0 ? (
+          {connError && (
+            <div className="mb-4 glass p-4 text-center">
+              <p className="text-red-300 text-sm font-bold">⚠️ データベースに接続できません</p>
+              <p className="text-white/50 text-xs mt-1">{connError}</p>
+            </div>
+          )}
+
+          {classMissing ? (
+            <div className="text-center py-20 animate-fade-in">
+              <div className="text-5xl mb-4">🗂️</div>
+              <p className="text-white/60 text-sm font-bold mb-1">この授業データは見つかりません</p>
+              <p className="text-white/40 text-xs mb-6">
+                別の端末で「授業終了」されたか、自動削除された可能性があります。
+              </p>
+              <button onClick={onBack} className="btn-primary px-6 py-3 rounded-2xl text-sm">
+                最初の画面にもどる
+              </button>
+            </div>
+          ) : !loaded ? (
+            <div className="text-center py-20">
+              <p className="text-white/40 text-sm">読み込み中…</p>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="text-center py-20 animate-fade-in">
               <div className="text-5xl mb-4">
                 {filter === 'all' ? '⏰' : STATUS_CONFIG[filter]?.emoji}
@@ -821,14 +1069,25 @@
               </button>
               <h3 className="text-xl font-black text-white mb-2" style={{fontFamily: '"M PLUS Rounded 1c", sans-serif'}}>参加用QRコード</h3>
               <p className="text-white/60 text-xs mb-6">こどもたちの端末で読み取ってください<br/>IDと教科が自動で入力されます</p>
-              <div className="bg-white p-2 rounded-xl inline-block mx-auto mb-4">
-                <img 
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(window.location.href.split('?')[0] + '?classId=' + classId + '&subject=' + subject)}`} 
-                  alt="QR Code" 
-                  width="256" 
-                  height="256" 
-                />
-              </div>
+              {window.location.protocol === 'file:' ? (
+                <div className="rounded-xl p-4 mb-4" style={{background: 'rgba(250,204,21,0.12)', border: '1px solid rgba(250,204,21,0.35)'}}>
+                  <p className="text-yellow-200 text-sm font-bold mb-1">QRコードは使えません</p>
+                  <p className="text-white/60 text-xs">
+                    このファイルはパソコン内から直接開かれています（file://）。<br/>
+                    QRを使うにはWebサーバーに置いて公開してください。<br/>
+                    今は下の授業IDを口頭で伝えてください。
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-white p-2 rounded-xl inline-block mx-auto mb-4">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(joinUrl)}`}
+                    alt={`授業ID ${classId} の参加用QRコード`}
+                    width="256"
+                    height="256"
+                  />
+                </div>
+              )}
               <p className="text-3xl font-black tracking-[0.3em] text-indigo-300 mb-2" style={{fontFamily: 'monospace'}}>
                 {classId}
               </p>
@@ -845,39 +1104,48 @@
   // 児童カードコンポーネント
   // ======================================================
   function StudentCard({ studentKey, student }) {
-    const lvCfg = LEVEL_CONFIG.find(l => l.level === student.understanding) || LEVEL_CONFIG[2];
+    // 未回答の児童を「ふつう(3)」として表示しないよう、見つからない場合は null にする
+    const lvCfg = LEVEL_CONFIG.find(l => l.level === student.understanding) || null;
     const stCfg = STATUS_CONFIG[student.status];
     const isHelp = student.status === 'help';
+    const isOffline = student.online === false;
 
     return (
-      <div className={`student-card p-4 ${isHelp ? 'help-highlight' : ''}`}>
+      <div className={`student-card p-4 ${isHelp ? 'help-highlight' : ''} ${isOffline ? 'offline' : ''}`}>
         {/* 名前 */}
-        <p className="text-white font-bold text-sm truncate mb-2" title={student.name}>
-          {student.name || studentKey}
-        </p>
+        <div className="flex items-center gap-1 mb-2">
+          <p className="text-white font-bold text-sm truncate flex-1" title={student.name}>
+            {student.name || studentKey}
+          </p>
+          {isOffline && <span title="接続が切れています">🔌</span>}
+        </div>
 
         {/* 理解度バー */}
         <div className="flex items-center gap-2 mb-2">
-          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-black text-sm ${lvCfg.className}`}
-            style={{boxShadow: `0 0 10px ${lvCfg.shadow}`}}>
-            {student.understanding || '-'}
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-black text-sm ${lvCfg ? lvCfg.className : 'level-none'}`}
+            style={lvCfg ? {boxShadow: `0 0 10px ${lvCfg.shadow}`} : undefined}>
+            {lvCfg ? lvCfg.level : '-'}
           </div>
-          <div className="flex-1">
+          <div className="flex-1 min-w-0">
             <div className="w-full rounded-full h-1.5" style={{background: 'rgba(255,255,255,0.1)'}}>
               <div
-                className={`h-1.5 rounded-full ${lvCfg.className}`}
-                style={{width: `${(student.understanding || 0) * 20}%`, transition: 'width 0.4s ease'}}
+                className={`h-1.5 rounded-full ${lvCfg ? lvCfg.className : ''}`}
+                style={{width: `${lvCfg ? lvCfg.level * 20 : 0}%`, transition: 'width 0.4s ease'}}
               />
             </div>
-            <p className="text-white/40 text-xs mt-0.5">{lvCfg.label}</p>
+            <p className="text-white/40 text-xs mt-0.5 truncate">{lvCfg ? lvCfg.label : '理解度は未回答'}</p>
           </div>
         </div>
 
         {/* ステータス */}
-        {stCfg && (
+        {stCfg ? (
           <div className={`badge ${stCfg.badgeClass} w-full justify-center`}>
             <span>{stCfg.emoji}</span>
             <span>{stCfg.label}</span>
+          </div>
+        ) : (
+          <div className="badge badge-none w-full justify-center">
+            <span>気持ちは未選択</span>
           </div>
         )}
       </div>
@@ -888,24 +1156,46 @@
   // 児童参加画面
   // ======================================================
   function StudentJoinScreen({ onJoin, onBack, initialData }) {
-    const [subject, setSubject] = useState(initialData?.subject || '算数');
-    const [classId, setClassId] = useState(initialData?.classId || '');
-    const [name, setName] = useState(() => localStorage.getItem('manabi_student_name') || '');
+    const [subject, setSubject] = useState(() => normalizeSubject(initialData?.subject));
+    const [classId, setClassId] = useState(() => normalizeClassId(initialData?.classId));
+    const [name, setName] = useState(() => safeStore.get(localStorage, 'manabi_student_name', ''));
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
     const handleJoin = async () => {
       if (!classId.match(/^\d{5}$/)) { setError('授業IDは5桁の数字を入力してください'); return; }
-      if (!name.trim()) { setError('名前か出席番号を入力してください'); return; }
+      const trimmedName = name.trim();
+      if (!trimmedName) { setError('名前か出席番号を入力してください'); return; }
       setLoading(true);
       setError('');
 
-      // 名前をローカルストレージに保存
-      localStorage.setItem('manabi_student_name', name.trim());
+      // 授業が存在するか確認する（IDの打ち間違いに気づけるように）。
+      // 読み取り権限が無い設定でも参加は止めないよう、確認の失敗は無視する。
+      let existing = null;
+      let checked = false;
+      try {
+        existing = await fetchClass(classId);
+        checked = firebaseReady;
+      } catch(e) {
+        console.warn('授業の確認をスキップしました:', e);
+      }
 
-      // こどもモードはFirestoreに接続確認せずそのまま参加
-      // （先生が授業を開始していない場合は初回送信時に自動作成）
-      onJoin({ classId: classId.trim(), subject, name: name.trim() });
+      if (checked && !existing) {
+        setError('その授業IDは見つかりません。番号を確認してね');
+        setLoading(false);
+        return;
+      }
+
+      // 先生より先に児童が参加した場合でもメタ情報を残し、自動削除されないようにする
+      try {
+        await ensureClassMeta(classId, existing?.subject || subject);
+      } catch(e) {
+        console.warn('メタ情報の作成をスキップしました:', e);
+      }
+
+      // 名前をローカルストレージに保存
+      safeStore.set(localStorage, 'manabi_student_name', trimmedName);
+      onJoin({ classId, subject: normalizeSubject(existing?.subject || subject), name: trimmedName });
     };
 
     return (
@@ -989,40 +1279,112 @@
     const [sendFlash, setSendFlash] = useState(false);
     const [lastSent, setLastSent] = useState(null);
     const [pendingUpdate, setPendingUpdate] = useState(false);
+    const [sendError, setSendError] = useState(null);
+    const [classEnded, setClassEnded] = useState(false);
 
-    // 児童のキー（名前をキーに使用。スペース等を除去）
-    const studentKey = name.replace(/[.#$/\[\]]/g, '_');
+    // 児童のキーは端末IDを使う。
+    // 名前をキーにすると同姓同名の児童が互いのデータを上書きしてしまうため。
+    const studentKey = useMemo(() => getDeviceId(), []);
 
-    // Firestoreへ送信（デバウンス1秒）
-    const sendToFirestore = useCallback(async (newUnderstanding, newStatus) => {
-      if (!newUnderstanding && !newStatus) return;
-      setPendingUpdate(false);
+    // 最新の選択内容を保持する。デバウンス中に別のボタンが押されても、
+    // 古い値の組み合わせを送信しないようにするため。
+    const latestRef = useRef({ understanding: null, status: null });
+    const flashTimerRef = useRef(null);
+    const presenceOffRef = useRef(null);
+
+    // 先生が授業を終了（データ削除）したら送信を止めて知らせる
+    useEffect(() => {
+      const unsub = subscribeClass(classId, (data, err) => {
+        if (!err) setClassEnded(data === null);
+      });
+      return () => unsub();
+    }, [classId]);
+
+    // 再読み込み後に自分の選択を復元する（先生の画面と表示がずれないように）
+    useEffect(() => {
+      if (!firebaseReady) return;
+      let alive = true;
+      db.ref(`classes/${classId}/students/${studentKey}`).once('value')
+        .then(snap => {
+          const mine = snap.val();
+          if (!alive || !mine) return;
+          const u = typeof mine.understanding === 'number' ? mine.understanding : null;
+          const s = STATUS_CONFIG[mine.status] ? mine.status : null;
+          if (u === null && s === null) return;
+          latestRef.current = { understanding: u, status: s };
+          setUnderstanding(u);
+          setStatus(s);
+          setLastSent(mine.updatedAt ? new Date(mine.updatedAt) : new Date());
+          if (!presenceOffRef.current) {
+            presenceOffRef.current = registerPresence(classId, studentKey);
+          }
+        })
+        .catch(e => console.warn('前回の選択を復元できませんでした:', e));
+      return () => { alive = false; };
+    }, [classId, studentKey]);
+
+    // アンマウント時に切断処理とタイマーを片付ける
+    useEffect(() => () => {
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      if (presenceOffRef.current) presenceOffRef.current();
+    }, []);
+
+    const sendToFirestore = useCallback(async () => {
+      const { understanding: u, status: s } = latestRef.current;
+      if (!u && !s) return;
       try {
         await updateStudent(classId, studentKey, {
           name,
-          understanding: newUnderstanding,
-          status: newStatus,
+          understanding: u,
+          status: s,
         });
+        // 初回送信が成功してから切断検知を登録する（空レコードを作らないため）
+        if (!presenceOffRef.current) {
+          presenceOffRef.current = registerPresence(classId, studentKey);
+        }
+        setPendingUpdate(false);
+        setSendError(null);
         setLastSent(new Date());
         setSendFlash(true);
-        setTimeout(() => setSendFlash(false), 1200);
+        if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+        flashTimerRef.current = setTimeout(() => setSendFlash(false), 1200);
       } catch(e) {
         console.error('送信エラー:', e);
+        setPendingUpdate(false);
+        setSendError(e.message || '送信できませんでした');
       }
     }, [classId, studentKey, name]);
 
     const debouncedSend = useDebounce(sendToFirestore, 1000);
 
     const handleLevelSelect = (level) => {
+      if (classEnded) return;
       setUnderstanding(level);
+      latestRef.current = { ...latestRef.current, understanding: level };
       setPendingUpdate(true);
-      debouncedSend(level, status);
+      debouncedSend();
     };
 
     const handleStatusSelect = (s) => {
-      setStatus(s);
+      if (classEnded) return;
+      // 同じボタンをもう一度押したら選択解除
+      const next = status === s ? null : s;
+      setStatus(next);
+      latestRef.current = { ...latestRef.current, status: next };
       setPendingUpdate(true);
-      debouncedSend(understanding, s);
+      debouncedSend();
+    };
+
+    // 退出：先生の画面から自分の表示を消してから戻る
+    const handleLeave = async () => {
+      if (!window.confirm('じゅぎょうから退出しますか？\n先生の画面から自分の表示が消えます。')) return;
+      if (presenceOffRef.current) { presenceOffRef.current(false); presenceOffRef.current = null; }
+      try {
+        await removeStudent(classId, studentKey);
+      } catch(e) {
+        console.warn('退出エラー:', e);
+      }
+      onBack();
     };
 
     const lvCfg = understanding ? LEVEL_CONFIG.find(l => l.level === understanding) : null;
@@ -1038,21 +1400,49 @@
           </div>
 
           {/* 送信状態インジケーター */}
-          <div className="flex items-center gap-2">
-            {pendingUpdate && (
+          <div className="flex items-center gap-3">
+            {sendError ? (
+              <button
+                onClick={() => { setPendingUpdate(true); sendToFirestore(); }}
+                className="flex items-center gap-1"
+                title={sendError}
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block"></span>
+                <span className="text-red-300 text-xs underline">送信できません（再送信）</span>
+              </button>
+            ) : pendingUpdate ? (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse inline-block"></span>
                 <span className="text-yellow-300 text-xs">送信中…</span>
               </div>
-            )}
-            {!pendingUpdate && lastSent && (
+            ) : lastSent ? (
               <div className="flex items-center gap-1">
                 <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block"></span>
                 <span className="text-green-300 text-xs">送信済み ✓</span>
               </div>
-            )}
+            ) : null}
+
+            <button
+              id="student-leave-btn"
+              onClick={handleLeave}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold flex-shrink-0"
+              style={{background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.18)', color: 'rgba(255,255,255,0.7)'}}
+            >
+              退出
+            </button>
           </div>
         </div>
+
+        {/* 授業終了の通知 */}
+        {classEnded && (
+          <div className="mx-4 mt-4 glass p-4 text-center animate-fade-in">
+            <p className="text-white font-bold text-sm mb-1">🏁 じゅぎょうが終わりました</p>
+            <p className="text-white/50 text-xs mb-3">先生が授業を終了しました。ボタンは使えません。</p>
+            <button onClick={onBack} className="btn-primary px-5 py-2 rounded-xl text-sm">
+              最初の画面にもどる
+            </button>
+          </div>
+        )}
 
         {/* 送信フラッシュ */}
         {sendFlash && (
@@ -1079,9 +1469,14 @@
                   key={cfg.level}
                   id={`level-btn-${cfg.level}`}
                   onClick={() => handleLevelSelect(cfg.level)}
+                  disabled={classEnded}
+                  aria-pressed={understanding === cfg.level}
+                  aria-label={`理解度 ${cfg.level} ${cfg.label}`}
                   className={`level-btn ${cfg.className} ${understanding === cfg.level ? 'selected' : ''}`}
                   style={{
                     height: '110px',
+                    opacity: classEnded ? 0.4 : 1,
+                    cursor: classEnded ? 'not-allowed' : 'pointer',
                     boxShadow: understanding === cfg.level ? `0 0 20px ${cfg.shadow}` : `0 4px 12px ${cfg.shadow}`,
                     color: 'white',
                     padding: '8px 4px',
@@ -1124,8 +1519,10 @@
                   key={key}
                   id={`status-btn-${key}`}
                   onClick={() => handleStatusSelect(key)}
+                  disabled={classEnded}
+                  aria-pressed={status === key}
                   className={`status-btn ${status === key ? cfg.className : ''}`}
-                  style={{minHeight: '70px', fontSize: '0.82rem'}}
+                  style={{minHeight: '70px', fontSize: '0.82rem', opacity: classEnded ? 0.4 : 1, cursor: classEnded ? 'not-allowed' : 'pointer'}}
                 >
                   <span style={{fontSize: '1.4rem'}}>{cfg.emoji}</span>
                   <span className="font-bold leading-tight text-center">{cfg.label}</span>
@@ -1151,22 +1548,45 @@
   // メインアプリコンポーネント
   // ======================================================
   function App() {
-    const [screen, setScreen] = useState('mode-select'); // mode-select | teacher-setup | teacher-dashboard | student-join | student-input
-    const [teacherInfo, setTeacherInfo] = useState(null);
-    const [studentInfo, setStudentInfo] = useState(null);
-    const [initialJoinData, setInitialJoinData] = useState(null);
-
-    // URLパラメータの確認（QRコードからの遷移時）
-    useEffect(() => {
+    // QRコード等のURLパラメータ（外部入力なので必ず検証する）
+    const urlJoinData = useMemo(() => {
       const params = new URLSearchParams(window.location.search);
-      const qClassId = params.get('classId');
-      const qSubject = params.get('subject');
-      
-      if (qClassId) {
-        setInitialJoinData({ classId: qClassId, subject: qSubject || '算数' });
-        setScreen('student-join');
-      }
+      const qClassId = normalizeClassId(params.get('classId'));
+      if (!/^\d{5}$/.test(qClassId)) return null;
+      return { classId: qClassId, subject: normalizeSubject(params.get('subject')) };
     }, []);
+
+    // 再読み込みで授業から強制的に追い出されないよう、直前の状態を復元する
+    const restored = useMemo(() => {
+      if (urlJoinData) return null;
+      try {
+        const raw = safeStore.get(sessionStorage, 'manabi_session');
+        if (!raw) return null;
+        const s = JSON.parse(raw);
+        if (s && (s.screen === 'teacher-dashboard' || s.screen === 'student-input')) return s;
+      } catch(e) { /* 壊れたデータは無視 */ }
+      return null;
+    }, [urlJoinData]);
+
+    // mode-select | teacher-setup | teacher-dashboard | student-join | student-input
+    const [screen, setScreen] = useState(() => {
+      if (urlJoinData) return 'student-join';
+      return restored ? restored.screen : 'mode-select';
+    });
+    const [teacherInfo, setTeacherInfo] = useState(() => restored?.teacherInfo || null);
+    const [studentInfo, setStudentInfo] = useState(() => restored?.studentInfo || null);
+    const [initialJoinData] = useState(() => urlJoinData);
+
+    // 授業中の状態だけを保存する
+    useEffect(() => {
+      if (screen === 'teacher-dashboard' && teacherInfo) {
+        safeStore.set(sessionStorage, 'manabi_session', JSON.stringify({ screen, teacherInfo }));
+      } else if (screen === 'student-input' && studentInfo) {
+        safeStore.set(sessionStorage, 'manabi_session', JSON.stringify({ screen, studentInfo }));
+      } else {
+        safeStore.remove(sessionStorage, 'manabi_session');
+      }
+    }, [screen, teacherInfo, studentInfo]);
 
     const handleTeacherStart = (info) => {
       setTeacherInfo(info);
@@ -1176,6 +1596,15 @@
     const handleStudentJoin = (info) => {
       setStudentInfo(info);
       setScreen('student-input');
+    };
+
+    // 最初の画面に戻るときは、復元用データとURLパラメータを消しておく
+    const handleBackToTop = () => {
+      safeStore.remove(sessionStorage, 'manabi_session');
+      if (window.location.search) {
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+      setScreen('mode-select');
     };
 
     return (
@@ -1189,21 +1618,21 @@
         {screen === 'teacher-setup' && (
           <TeacherSetupScreen
             onStartClass={handleTeacherStart}
-            onBack={() => setScreen('mode-select')}
+            onBack={handleBackToTop}
           />
         )}
         {screen === 'teacher-dashboard' && teacherInfo && (
           <TeacherDashboard
             classId={teacherInfo.classId}
             subject={teacherInfo.subject}
-            onBack={() => setScreen('mode-select')}
+            onBack={handleBackToTop}
           />
         )}
         {screen === 'student-join' && (
           <StudentJoinScreen
             initialData={initialJoinData}
             onJoin={handleStudentJoin}
-            onBack={() => setScreen('mode-select')}
+            onBack={handleBackToTop}
           />
         )}
         {screen === 'student-input' && studentInfo && (
@@ -1211,7 +1640,7 @@
             classId={studentInfo.classId}
             subject={studentInfo.subject}
             name={studentInfo.name}
-            onBack={() => setScreen('mode-select')}
+            onBack={handleBackToTop}
           />
         )}
       </div>
