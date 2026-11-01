@@ -379,28 +379,38 @@
     return date.toLocaleString('ja-JP', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
   }
 
-  // localStorage / sessionStorage はプライベートモードや file:// で例外を投げることがある
+  // localStorage / sessionStorage はプライベートモードや file:// で例外を投げることがある。
+  // window.localStorage を参照するだけで例外になる環境もあるため、参照自体を try の中で行う。
   const safeStore = {
-    get(storage, key, fallback = null) {
-      try { const v = storage.getItem(key); return v === null ? fallback : v; }
+    get(area, key, fallback = null) {
+      try { const v = window[area].getItem(key); return v === null ? fallback : v; }
       catch(e) { return fallback; }
     },
-    set(storage, key, value) {
-      try { storage.setItem(key, value); } catch(e) { /* 保存できなくても動作は継続 */ }
+    set(area, key, value) {
+      try { window[area].setItem(key, value); } catch(e) { /* 保存できなくても動作は継続 */ }
     },
-    remove(storage, key) {
-      try { storage.removeItem(key); } catch(e) { /* noop */ }
+    remove(area, key) {
+      try { window[area].removeItem(key); } catch(e) { /* noop */ }
     },
   };
 
   // 端末ごとの識別子。同姓同名の児童がデータを上書きし合うのを防ぐ。
+  // 保存できない環境でも、同じページ内では同じIDを返す（呼ぶたびに別人扱いにならないように）。
+  let memoryDeviceId = null;
   function getDeviceId() {
-    let id = safeStore.get(localStorage, 'manabi_device_id');
-    if (!id || !/^[a-z0-9]{6,}$/.test(id)) {
-      id = Math.random().toString(36).slice(2, 10);
-      safeStore.set(localStorage, 'manabi_device_id', id);
+    const isValid = v => typeof v === 'string' && /^[a-z0-9]{8,}$/.test(v);
+    let id = safeStore.get('localStorage', 'manabi_device_id');
+    if (isValid(id)) return id;
+    id = safeStore.get('sessionStorage', 'manabi_device_id');
+    if (isValid(id)) return id;
+    if (!memoryDeviceId) {
+      const bytes = new Uint8Array(8);
+      crypto.getRandomValues(bytes);
+      memoryDeviceId = Array.from(bytes, b => (b % 36).toString(36)).join('');
     }
-    return id;
+    safeStore.set('localStorage', 'manabi_device_id', memoryDeviceId);
+    safeStore.set('sessionStorage', 'manabi_device_id', memoryDeviceId);
+    return memoryDeviceId;
   }
 
   // URL パラメータ等、外部から来た教科名は必ず既定リストに丸める
@@ -413,17 +423,24 @@
   }
 
   // デバウンス（1秒）。最新の関数を参照し、アンマウント時にタイマーを破棄する。
+  // 退出・授業終了時に送信予約を取り消せるよう cancel() も持たせる。
   function useDebounce(fn, delay = 1000) {
     const timerRef = useRef(null);
     const fnRef = useRef(fn);
     useEffect(() => { fnRef.current = fn; }, [fn]);
     useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
-    return useCallback((...args) => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => {
-        timerRef.current = null;
-        fnRef.current(...args);
-      }, delay);
+    return useMemo(() => {
+      const debounced = (...args) => {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => {
+          timerRef.current = null;
+          fnRef.current(...args);
+        }, delay);
+      };
+      debounced.cancel = () => {
+        if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+      };
+      return debounced;
     }, [delay]);
   }
 
@@ -437,13 +454,19 @@
     return snap.exists() ? (snap.val() || {}) : null;
   }
 
+  // 先生が作成した「生きている授業」か。
+  // createdAt の無いデータは、授業終了の直後に児童端末から書き込まれてしまった残骸。
+  function isLiveClass(data) {
+    return !!data && typeof data.createdAt === 'number';
+  }
+
   // まだ使われていない授業IDを探す（ID重複による他クラスへの混入を防ぐ）
   async function generateUniqueClassId() {
     if (!firebaseReady) return generateClassId();
     for (let i = 0; i < 20; i++) {
       const id = generateClassId();
       try {
-        if (!(await fetchClass(id))) return id;
+        if (!isLiveClass(await fetchClass(id))) return id;
       } catch(e) {
         return id; // 権限エラー等では確認を諦めて通常生成
       }
@@ -452,11 +475,12 @@
   }
 
   // 授業を新規作成する。既に同じIDの授業がある場合は作成せず false を返す。
+  // 残骸データしか無いIDは空いているものとして上書きする。
   async function initClass(classId, subject) {
     if (!firebaseReady) return true;
     const ref = db.ref(`classes/${classId}`);
     const snap = await ref.once('value');
-    if (snap.exists()) return false;
+    if (isLiveClass(snap.val())) return false;
     await ref.set({
       subject,
       createdAt: firebase.database.ServerValue.TIMESTAMP,
@@ -465,47 +489,37 @@
     return true;
   }
 
-  // 児童が先に参加した授業には createdAt が無く、自動削除の対象になってしまう。
-  // 不足しているメタ情報だけを補う。
-  async function ensureClassMeta(classId, subject) {
-    if (!firebaseReady) return;
-    const ref = db.ref(`classes/${classId}`);
-    const snap = await ref.child('createdAt').once('value');
-    if (!snap.exists()) {
-      await ref.update({ subject, createdAt: firebase.database.ServerValue.TIMESTAMP });
-    }
-  }
-
-  // Firebase の update() は null を渡すとそのキーを削除するため、未選択の項目は送らない
-  function omitEmpty(obj) {
-    const out = {};
-    Object.keys(obj).forEach(k => {
-      if (obj[k] !== null && obj[k] !== undefined) out[k] = obj[k];
-    });
-    return out;
-  }
-
+  // understanding / status に null を渡すと Firebase 上のキーが消える。
+  // 「選択を取り消した」ことを先生の画面に反映するため、null はそのまま送る。
   async function updateStudent(classId, studentKey, data) {
     if (!firebaseReady) { console.log('[MOCK] updateStudent', classId, studentKey, data); return; }
     const ref = db.ref(`classes/${classId}/students/${studentKey}`);
     await ref.update({
-      ...omitEmpty(data),
+      ...data,
       online: true,
       updatedAt: firebase.database.ServerValue.TIMESTAMP
     });
   }
 
-  // 端末が切断されたら自動で「離席」表示にする（タブを閉じた児童が残り続けるのを防ぐ）
-  function registerPresence(classId, studentKey) {
+  // 端末が切断されたら自動で「離席」表示にする（タブを閉じた児童が残り続けるのを防ぐ）。
+  // onDisconnect は一度発火すると消えるので、回線が戻るたびに張り直す。
+  // isAlive() が false（授業終了・退出済み）のときは一切書き込まない。
+  function registerPresence(classId, studentKey, isAlive) {
     if (!firebaseReady) return () => {};
-    const ref = db.ref(`classes/${classId}/students/${studentKey}/online`);
-    ref.onDisconnect().set(false);
-    // 再読み込み後など、切断扱いのまま残っているレコードを接続中に戻す
-    ref.set(true).catch(() => {});
+    const onlineRef = db.ref(`classes/${classId}/students/${studentKey}/online`);
+    const connRef = db.ref('.info/connected');
+    const handler = snap => {
+      if (snap.val() !== true || !isAlive()) return;
+      onlineRef.onDisconnect().set(false)
+        .then(() => { if (isAlive()) return onlineRef.set(true); })
+        .catch(() => {});
+    };
+    connRef.on('value', handler);
     // markOffline=false で呼ぶと、退出処理（レコード削除）と競合しない
     return (markOffline = true) => {
-      ref.onDisconnect().cancel().catch(() => {});
-      if (markOffline) ref.set(false).catch(() => {});
+      connRef.off('value', handler);
+      onlineRef.onDisconnect().cancel().catch(() => {});
+      if (markOffline && isAlive()) onlineRef.set(false).catch(() => {});
     };
   }
 
@@ -527,26 +541,42 @@
     return () => ref.off('value', handler);
   }
 
+  // 児童端末用：授業が続いているかだけを購読する。
+  // クラス全体を購読すると、全員の端末に全員の回答が毎回配信されてしまうため。
+  function subscribeClassAlive(classId, callback) {
+    if (!firebaseReady) return () => {};
+    const ref = db.ref(`classes/${classId}/createdAt`);
+    const handler = snap => callback(typeof snap.val() === 'number');
+    const errorHandler = err => console.warn('subscribe error:', err);
+    ref.on('value', handler, errorHandler);
+    return () => ref.off('value', handler);
+  }
+
   // 授業データを削除
   async function deleteClass(classId) {
     if (!firebaseReady) return;
     await db.ref(`classes/${classId}`).remove();
   }
 
-  // 24時間以上前の古いクラスを自動削除
+  // 24時間以上前の古いクラスと、授業終了後に残った残骸データを自動削除
   async function cleanupOldClasses(hoursToKeep = 24) {
     if (!firebaseReady) return 0;
-    const cutoff = Date.now() - hoursToKeep * 60 * 60 * 1000;
+    const now = Date.now();
+    const cutoff = now - hoursToKeep * 60 * 60 * 1000;
+    const orphanCutoff = now - 10 * 60 * 1000;
     try {
       const snap = await db.ref('classes').once('value');
       if (!snap.exists()) return 0;
       const tasks = [];
       snap.forEach(child => {
-        const createdAt = child.val()?.createdAt;
-        // createdAt が無いデータ（＝作成途中）を巻き添えで消さないよう、
-        // 数値として記録されているものだけを判定対象にする
-        if (typeof createdAt === 'number' && createdAt > 0 && createdAt < cutoff) {
-          tasks.push(db.ref(`classes/${child.key}`).remove());
+        const data = child.val() || {};
+        if (isLiveClass(data)) {
+          if (data.createdAt < cutoff) tasks.push(db.ref(`classes/${child.key}`).remove());
+        } else {
+          // createdAt の無い残骸は、最後の書き込みから10分経っていれば削除する
+          const latest = Math.max(0, ...Object.values(data.students || {})
+            .map(s => (s && typeof s.updatedAt === 'number') ? s.updatedAt : 0));
+          if (latest < orphanCutoff) tasks.push(db.ref(`classes/${child.key}`).remove());
         }
       });
       await Promise.all(tasks);
@@ -635,6 +665,7 @@
     const [error, setError] = useState('');
     const [cleanedCount, setCleanedCount] = useState(0);
     const [conflict, setConflict] = useState(null); // 使用中IDの情報
+    const userEditedRef = useRef(false); // 先生がIDを手入力したら自動生成で上書きしない
 
     // 画面表示時に古いクラスを自動削除し、未使用のIDを用意する
     useEffect(() => {
@@ -642,7 +673,7 @@
       cleanupOldClasses(24)
         .then(n => { if (alive && n > 0) setCleanedCount(n); })
         .then(() => generateUniqueClassId())
-        .then(id => { if (alive) setClassId(id); })
+        .then(id => { if (alive && !userEditedRef.current) setClassId(id); })
         .catch(e => console.warn('初期化エラー:', e));
       return () => { alive = false; };
     }, []);
@@ -676,8 +707,20 @@
 
     // 自分の授業に戻る（再読み込み後の復帰など）
     const handleRejoin = async () => {
-      const existing = await fetchClass(classId).catch(() => null);
-      onStartClass({ classId, subject: existing?.subject || subject });
+      setLoading(true);
+      try {
+        const existing = await fetchClass(classId);
+        if (isLiveClass(existing)) {
+          onStartClass({ classId, subject: normalizeSubject(existing.subject) });
+          return;
+        }
+        // 確認している間に授業が終了していたら、新しい授業として作り直す
+        await initClass(classId, subject);
+        onStartClass({ classId, subject });
+      } catch(e) {
+        setError('エラーが発生しました: ' + e.message);
+        setLoading(false);
+      }
     };
 
     return (
@@ -724,7 +767,11 @@
                     id="teacher-class-id-input"
                     type="text"
                     value={classId}
-                    onChange={e => setClassId(e.target.value.replace(/\D/g, '').slice(0,5))}
+                    onChange={e => {
+                      userEditedRef.current = true;
+                      setConflict(null);
+                      setClassId(e.target.value.replace(/\D/g, '').slice(0,5));
+                    }}
                     maxLength={5}
                     className="input-field text-2xl font-black tracking-[0.3em] text-center"
                     style={{fontFamily: 'monospace'}}
@@ -808,7 +855,6 @@
     const [saving, setSaving] = useState(false);
     const [showQR, setShowQR] = useState(false);
     const dashboardRef = useRef(null);
-    const startTime = useRef(new Date());
 
     useEffect(() => {
       const unsub = subscribeClass(classId, (data, err) => {
@@ -828,7 +874,10 @@
       try {
         await deleteClass(classId);
       } catch(e) {
+        // 消せていないのに「終了した」ことにすると、こどもの端末は授業中のまま残る
         console.warn('削除エラー:', e);
+        alert('授業データを削除できませんでした。通信状況を確認して、もう一度「授業終了」を押してください。\n' + e.message);
+        return;
       }
       onBack();
     };
@@ -853,7 +902,8 @@
       ? (answered.reduce((sum, [,s]) => sum + s.understanding, 0) / answered.length).toFixed(1)
       : '-';
 
-    const classMissing = loaded && !connError && classData === null;
+    // デモモード（Firebase未接続）では常に classData が null なので「見つからない」扱いにしない
+    const classMissing = firebaseReady && loaded && !connError && !isLiveClass(classData);
 
     // 参加用URL（教科名などは URLSearchParams で正しくエスケープする）
     const joinUrl = useMemo(() => {
@@ -879,7 +929,10 @@
           logging: false,
         });
         const link = document.createElement('a');
-        link.download = `まなびメーター_${subject}_${classId}_${new Date().toISOString().slice(0,10)}.png`;
+        // toISOString() は UTC なので、日本時間の朝9時前だと前日の日付になってしまう
+        const d = new Date();
+        const localDate = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        link.download = `まなびメーター_${subject}_${classId}_${localDate}.png`;
         link.href = canvas.toDataURL('image/png');
         document.body.appendChild(link);
         link.click();
@@ -1014,7 +1067,7 @@
                 </div>
                 <div>
                   <p className="text-green-400 font-black text-lg leading-none">{avgLevel}</p>
-                  <p className="text-white/40 text-xs">平均</p>
+                  <p className="text-white/40 text-xs">平均({answered.length})</p>
                 </div>
               </div>
             </div>
@@ -1158,7 +1211,7 @@
   function StudentJoinScreen({ onJoin, onBack, initialData }) {
     const [subject, setSubject] = useState(() => normalizeSubject(initialData?.subject));
     const [classId, setClassId] = useState(() => normalizeClassId(initialData?.classId));
-    const [name, setName] = useState(() => safeStore.get(localStorage, 'manabi_student_name', ''));
+    const [name, setName] = useState(() => safeStore.get('localStorage', 'manabi_student_name', ''));
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
@@ -1180,21 +1233,15 @@
         console.warn('授業の確認をスキップしました:', e);
       }
 
-      if (checked && !existing) {
+      // 終了済みの授業の残骸（createdAt なし）にも参加させない
+      if (checked && !isLiveClass(existing)) {
         setError('その授業IDは見つかりません。番号を確認してね');
         setLoading(false);
         return;
       }
 
-      // 先生より先に児童が参加した場合でもメタ情報を残し、自動削除されないようにする
-      try {
-        await ensureClassMeta(classId, existing?.subject || subject);
-      } catch(e) {
-        console.warn('メタ情報の作成をスキップしました:', e);
-      }
-
       // 名前をローカルストレージに保存
-      safeStore.set(localStorage, 'manabi_student_name', trimmedName);
+      safeStore.set('localStorage', 'manabi_student_name', trimmedName);
       onJoin({ classId, subject: normalizeSubject(existing?.subject || subject), name: trimmedName });
     };
 
@@ -1291,57 +1338,47 @@
     const latestRef = useRef({ understanding: null, status: null });
     const flashTimerRef = useRef(null);
     const presenceOffRef = useRef(null);
+    const classEndedRef = useRef(false); // 授業終了後は一切書き込まない（残骸データを作らない）
+    const leavingRef = useRef(false);    // 退出処理中・退出後は一切書き込まない
+    const hasSentRef = useRef(false);    // 先生の画面に自分のカードが存在するか
+    const touchedRef = useRef(false);    // この画面でボタンを押したか（復元で上書きしないため）
+    const inflightRef = useRef(null);    // 送信中の Promise（退出前に完了を待つ）
 
-    // 先生が授業を終了（データ削除）したら送信を止めて知らせる
-    useEffect(() => {
-      const unsub = subscribeClass(classId, (data, err) => {
-        if (!err) setClassEnded(data === null);
-      });
-      return () => unsub();
-    }, [classId]);
+    const isAlive = useCallback(() => !classEndedRef.current && !leavingRef.current, []);
 
-    // 再読み込み後に自分の選択を復元する（先生の画面と表示がずれないように）
-    useEffect(() => {
-      if (!firebaseReady) return;
-      let alive = true;
-      db.ref(`classes/${classId}/students/${studentKey}`).once('value')
-        .then(snap => {
-          const mine = snap.val();
-          if (!alive || !mine) return;
-          const u = typeof mine.understanding === 'number' ? mine.understanding : null;
-          const s = STATUS_CONFIG[mine.status] ? mine.status : null;
-          if (u === null && s === null) return;
-          latestRef.current = { understanding: u, status: s };
-          setUnderstanding(u);
-          setStatus(s);
-          setLastSent(mine.updatedAt ? new Date(mine.updatedAt) : new Date());
-          if (!presenceOffRef.current) {
-            presenceOffRef.current = registerPresence(classId, studentKey);
-          }
-        })
-        .catch(e => console.warn('前回の選択を復元できませんでした:', e));
-      return () => { alive = false; };
-    }, [classId, studentKey]);
+    const stopPresence = (markOffline) => {
+      if (presenceOffRef.current) { presenceOffRef.current(markOffline); presenceOffRef.current = null; }
+    };
+    const startPresence = () => {
+      if (!presenceOffRef.current && isAlive()) {
+        presenceOffRef.current = registerPresence(classId, studentKey, isAlive);
+      }
+    };
 
     // アンマウント時に切断処理とタイマーを片付ける
     useEffect(() => () => {
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      if (presenceOffRef.current) presenceOffRef.current();
+      stopPresence(true);
     }, []);
 
     const sendToFirestore = useCallback(async () => {
+      if (!isAlive()) { setPendingUpdate(false); return; }
       const { understanding: u, status: s } = latestRef.current;
-      if (!u && !s) return;
+      // まだカードが無く、何も選んでいなければ送らない（空のカードを作らない）。
+      // 一度送った後は、すべて取り消した状態も先生に反映させる。
+      if (!u && !s && !hasSentRef.current) { setPendingUpdate(false); return; }
+      const task = updateStudent(classId, studentKey, {
+        name,
+        understanding: u || null,
+        status: s || null,
+      });
+      inflightRef.current = task;
       try {
-        await updateStudent(classId, studentKey, {
-          name,
-          understanding: u,
-          status: s,
-        });
+        await task;
+        if (!isAlive()) return; // 送信中に授業終了・退出した
+        hasSentRef.current = true;
         // 初回送信が成功してから切断検知を登録する（空レコードを作らないため）
-        if (!presenceOffRef.current) {
-          presenceOffRef.current = registerPresence(classId, studentKey);
-        }
+        startPresence();
         setPendingUpdate(false);
         setSendError(null);
         setLastSent(new Date());
@@ -1351,14 +1388,55 @@
       } catch(e) {
         console.error('送信エラー:', e);
         setPendingUpdate(false);
-        setSendError(e.message || '送信できませんでした');
+        if (isAlive()) setSendError(e.message || '送信できませんでした');
+      } finally {
+        if (inflightRef.current === task) inflightRef.current = null;
       }
-    }, [classId, studentKey, name]);
+    }, [classId, studentKey, name, isAlive]);
 
     const debouncedSend = useDebounce(sendToFirestore, 1000);
 
+    // 先生が授業を終了（データ削除）したら送信を止めて知らせる。
+    // 一度終了したら元に戻さない（同じIDで別の授業が作られても、そちらに混ざらないように）。
+    useEffect(() => {
+      const unsub = subscribeClassAlive(classId, live => {
+        if (live || classEndedRef.current) return;
+        classEndedRef.current = true;
+        debouncedSend.cancel();
+        stopPresence(false);
+        setPendingUpdate(false);
+        setSendError(null);
+        setClassEnded(true);
+      });
+      return () => unsub();
+    }, [classId, debouncedSend]);
+
+    // 再読み込み後に自分の選択を復元する（先生の画面と表示がずれないように）
+    useEffect(() => {
+      if (!firebaseReady) return;
+      let alive = true;
+      db.ref(`classes/${classId}/students/${studentKey}`).once('value')
+        .then(snap => {
+          const mine = snap.val();
+          if (!alive || !mine || !mine.name || !isAlive()) return;
+          hasSentRef.current = true;
+          startPresence();
+          // 読み込みを待つ間にボタンが押されていたら、そちらを優先する
+          if (touchedRef.current) return;
+          const u = LEVEL_CONFIG.some(l => l.level === mine.understanding) ? mine.understanding : null;
+          const s = STATUS_CONFIG[mine.status] ? mine.status : null;
+          latestRef.current = { understanding: u, status: s };
+          setUnderstanding(u);
+          setStatus(s);
+          setLastSent(mine.updatedAt ? new Date(mine.updatedAt) : new Date());
+        })
+        .catch(e => console.warn('前回の選択を復元できませんでした:', e));
+      return () => { alive = false; };
+    }, [classId, studentKey, isAlive]);
+
     const handleLevelSelect = (level) => {
-      if (classEnded) return;
+      if (!isAlive()) return;
+      touchedRef.current = true;
       setUnderstanding(level);
       latestRef.current = { ...latestRef.current, understanding: level };
       setPendingUpdate(true);
@@ -1366,9 +1444,10 @@
     };
 
     const handleStatusSelect = (s) => {
-      if (classEnded) return;
+      if (!isAlive()) return;
+      touchedRef.current = true;
       // 同じボタンをもう一度押したら選択解除
-      const next = status === s ? null : s;
+      const next = latestRef.current.status === s ? null : s;
       setStatus(next);
       latestRef.current = { ...latestRef.current, status: next };
       setPendingUpdate(true);
@@ -1378,11 +1457,17 @@
     // 退出：先生の画面から自分の表示を消してから戻る
     const handleLeave = async () => {
       if (!window.confirm('じゅぎょうから退出しますか？\n先生の画面から自分の表示が消えます。')) return;
-      if (presenceOffRef.current) { presenceOffRef.current(false); presenceOffRef.current = null; }
-      try {
-        await removeStudent(classId, studentKey);
-      } catch(e) {
-        console.warn('退出エラー:', e);
+      leavingRef.current = true;
+      debouncedSend.cancel();
+      stopPresence(false);
+      // 送信中のデータが削除の後に届くと、退出したのにカードが復活してしまうので完了を待つ
+      if (inflightRef.current) { try { await inflightRef.current; } catch(e) { /* 送信失敗は無視 */ } }
+      if (!classEndedRef.current) {
+        try {
+          await removeStudent(classId, studentKey);
+        } catch(e) {
+          console.warn('退出エラー:', e);
+        }
       }
       onBack();
     };
@@ -1556,22 +1641,29 @@
       return { classId: qClassId, subject: normalizeSubject(params.get('subject')) };
     }, []);
 
-    // 再読み込みで授業から強制的に追い出されないよう、直前の状態を復元する
+    // 再読み込みで授業から強制的に追い出されないよう、直前の状態を復元する。
+    // QRコードのURL（?classId=…）のまま再読み込みした場合も、同じ授業なら復元を優先する。
     const restored = useMemo(() => {
-      if (urlJoinData) return null;
       try {
-        const raw = safeStore.get(sessionStorage, 'manabi_session');
+        const raw = safeStore.get('sessionStorage', 'manabi_session');
         if (!raw) return null;
         const s = JSON.parse(raw);
-        if (s && (s.screen === 'teacher-dashboard' || s.screen === 'student-input')) return s;
+        const validId = info => !!info && /^\d{5}$/.test(String(info.classId));
+        if (s?.screen === 'teacher-dashboard' && validId(s.teacherInfo) && !urlJoinData) {
+          return { screen: s.screen, teacherInfo: { classId: String(s.teacherInfo.classId), subject: normalizeSubject(s.teacherInfo.subject) } };
+        }
+        if (s?.screen === 'student-input' && validId(s.studentInfo) && typeof s.studentInfo.name === 'string' && s.studentInfo.name.trim()
+            && (!urlJoinData || urlJoinData.classId === String(s.studentInfo.classId))) {
+          return { screen: s.screen, studentInfo: { classId: String(s.studentInfo.classId), subject: normalizeSubject(s.studentInfo.subject), name: s.studentInfo.name.trim() } };
+        }
       } catch(e) { /* 壊れたデータは無視 */ }
       return null;
     }, [urlJoinData]);
 
     // mode-select | teacher-setup | teacher-dashboard | student-join | student-input
     const [screen, setScreen] = useState(() => {
-      if (urlJoinData) return 'student-join';
-      return restored ? restored.screen : 'mode-select';
+      if (restored) return restored.screen;
+      return urlJoinData ? 'student-join' : 'mode-select';
     });
     const [teacherInfo, setTeacherInfo] = useState(() => restored?.teacherInfo || null);
     const [studentInfo, setStudentInfo] = useState(() => restored?.studentInfo || null);
@@ -1580,13 +1672,19 @@
     // 授業中の状態だけを保存する
     useEffect(() => {
       if (screen === 'teacher-dashboard' && teacherInfo) {
-        safeStore.set(sessionStorage, 'manabi_session', JSON.stringify({ screen, teacherInfo }));
+        safeStore.set('sessionStorage', 'manabi_session', JSON.stringify({ screen, teacherInfo }));
       } else if (screen === 'student-input' && studentInfo) {
-        safeStore.set(sessionStorage, 'manabi_session', JSON.stringify({ screen, studentInfo }));
+        safeStore.set('sessionStorage', 'manabi_session', JSON.stringify({ screen, studentInfo }));
       } else {
-        safeStore.remove(sessionStorage, 'manabi_session');
+        safeStore.remove('sessionStorage', 'manabi_session');
       }
     }, [screen, teacherInfo, studentInfo]);
+
+    const clearUrlParams = () => {
+      if (window.location.search) {
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+    };
 
     const handleTeacherStart = (info) => {
       setTeacherInfo(info);
@@ -1594,16 +1692,16 @@
     };
 
     const handleStudentJoin = (info) => {
+      // 参加後はQRのパラメータを消す（再読み込み時は sessionStorage から復元する）
+      clearUrlParams();
       setStudentInfo(info);
       setScreen('student-input');
     };
 
     // 最初の画面に戻るときは、復元用データとURLパラメータを消しておく
     const handleBackToTop = () => {
-      safeStore.remove(sessionStorage, 'manabi_session');
-      if (window.location.search) {
-        window.history.replaceState({}, '', window.location.pathname);
-      }
+      safeStore.remove('sessionStorage', 'manabi_session');
+      clearUrlParams();
       setScreen('mode-select');
     };
 
